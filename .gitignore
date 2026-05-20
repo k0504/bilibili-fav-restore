@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 第三方參考腳本（GPL-3.0，cerenkov 等），僅本機留檔不入庫
+哔哩哔哩*.user.js
+*cerenkov*.user.js
+
+# 防衛性：access_key / mitm dump / android sdk 之類絕對不能入庫
+_andsdk/
+*access_key*
+*.mitmproxy
+mitm_dump/
+*.har
+
+# 注意：dist/ 必須入庫（GitHub raw URL 對 end user 服這檔）
+# 不要把 dist/ 加進來
