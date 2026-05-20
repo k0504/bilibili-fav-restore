@@ -16,5 +16,9 @@ _andsdk/
 mitm_dump/
 *.har
 
+# Greasy Fork 描述頁的 source —— 本機留檔便於下次更新 GF 後台，
+# 但無 GF API 可自動同步，入庫只會跟 GF 線上版漂移，所以不追蹤
+GREASYFORK.md
+
 # 注意：dist/ 必須入庫（GitHub raw URL 對 end user 服這檔）
 # 不要把 dist/ 加進來

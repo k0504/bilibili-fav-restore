@@ -25,15 +25,17 @@ Tampermonkey 雙層 userscript：在 B 站網頁版收藏夾頁面把失效視�
 | `bilibili-fav-list-fix-core.js` | 主邏輯：sources / resolver / cache / DOM patch / 選單注入 / TV QR login / missing banner | |
 | `serve.py` | 本機 :8765 HTTP server，no-cache header（給 bootstrap 用） | |
 | `build.py` | 把 core 打包成 `dist/bilibili-fav-restore.user.js`（end-user 單檔版） | |
-| `dist/bilibili-fav-restore.user.js` | **end-user 發布物**。GitHub raw URL 對外，TM auto-update | |
+| `dist/bilibili-fav-restore.user.js` | **end-user 發布物**。GitHub raw URL 對外，TM auto-update。Greasy Fork mirror 從同一 raw URL sync | |
 | `README.md` | 給人類的安裝與開發流程 | |
 | `LICENSE` | MIT | |
 
 **兩條安裝路徑同時存在**：
-- end user → `dist/bilibili-fav-restore.user.js`（GitHub raw、單檔、TM auto-update）
+- end user → 兩個 mirror 任選：
+  - GitHub raw: `dist/bilibili-fav-restore.user.js`（即時，每次 `git push` 立即可裝）
+  - [Greasy Fork mirror](https://greasyfork.org/zh-TW/scripts/578965-bilibili-收藏夹失效视频还原)（從 GH raw URL sync，~24h 延遲）
 - contributor → `bilibili-fav-list-fix.user.js`（bootstrap）+ `serve.py`（改 core 不用重裝 TM）
 
-兩者 share 同一份 `bilibili-fav-list-fix-core.js`。改 core → 跑 `python build.py` → commit dist/。
+兩者 share 同一份 `bilibili-fav-list-fix-core.js`。改 core → 跑 `python build.py` → commit dist/ → push（GF 自動 sync，無需另發）。
 
 ---
 
@@ -61,6 +63,8 @@ Tampermonkey 雙層 userscript：在 B 站網頁版收藏夾頁面把失效視�
 
 11. **`build.py` header 與 bootstrap header 是兩份手寫副本** —— `@grant` / `@connect` / `@match` 三條清單在兩處各有一份（`bilibili-fav-list-fix.user.js` header ＋ `build.py:build_header()`），沒程式化檢查。core 引入新 `GM_*` 用法或新 fetch 域名時，**兩份都要改**。`build.py` 的 `@connect` 比 bootstrap 少 `127.0.0.1` / `localhost` 兩條（end-user 不需 server fetch）—— 加新 connect 時記得這個差異
 
+12. **Greasy Fork 是 GH raw 的 mirror，不是獨立 source** —— [GF script #578965](https://greasyfork.org/zh-TW/scripts/578965-bilibili-收藏夹失效视频还原) 設了 sync from [dist/ 的 GH raw URL](https://raw.githubusercontent.com/k0504/bilibili-fav-restore/main/dist/bilibili-fav-restore.user.js)，push 後 GF 約 24h 自動拉新版（CORE_VERSION 增大才視為更新；README-only 改動 GF 不會 sync）。**GF 頁面的描述文字不會自動 sync** —— 要改得登入 GF 後台手動貼（描述源以本機 `GREASYFORK.md` 為準，該檔 gitignored 不入庫，避免與 GF 線上版漂移）。GF 用戶安裝後 `@updateURL` / `@downloadURL` 被 GF 改寫指向 GF 自己的 update URL —— 從 GF 裝就從 GF 更新；GH raw 裝的仍從 GH 更新。**核心結論**：dist/ 的內容是 sync 來源；GF 描述頁是手動同步；兩者改動觸發路徑完全不同
+
 ---
 
 ## 欲修改 X 應讀何處
@@ -80,5 +84,7 @@ Tampermonkey 雙層 userscript：在 B 站網頁版收藏夾頁面把失效視�
 | 換伺服器 port | `serve.py` `DEFAULT_PORT` ＋ `bilibili-fav-list-fix.user.js` `SERVER_BASE` ＋ `README.md`（陷阱 1） |
 | 發版給 end user | bump `core.js:38` `CORE_VERSION` → `python build.py` → `git add core.js dist/` → commit（陷阱 9 + 10） |
 | 改 dist meta（GH user / repo / @name 等） | `build.py` 頂端常數 `GH_USER` / `GH_REPO` ＋ `build_header()` 字串 |
+| 改 GF 頁面描述 / 安裝指引 | 本機 `GREASYFORK.md`（gitignored，source of truth）→ 手動貼進 GF 後台 script 描述欄（GF 不會 auto-sync 描述，只 sync source code）（陷阱 12） |
+| GF sync URL / sync 觸發條件 | GF script 管理頁的 "Sync from external URL"（已設 GH raw），更新觸發看 `@version` 增加（陷阱 12） |
 | TV QR login 流程 | `core.js` `tvAuthCode / tvPoll / tvLogin / showQrModal`；QR 渲染用 `api.qrserver.com`，要換 JS encoder 在 `showQrModal` 改 |
 | 改 hits 偵測 / DOM 走訪 | `core.js` `findInvalidContainers()`；後續 patch 流程在 `patchOnce()` |

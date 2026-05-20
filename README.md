@@ -16,13 +16,14 @@ bilibili 网页版的收藏夹接口对失效条目仅返回固定占位封面�
 ## 安装
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（Chrome、Edge、Firefox 均可）。
-2. 在浏览器地址栏直接访问以下链接，Tampermonkey 将弹出安装对话框：
+2. 选择以下任一入口，浏览器访问后 Tampermonkey 将弹出安装对话框：
 
-   ```
-   https://raw.githubusercontent.com/k0504/bilibili-fav-restore/main/dist/bilibili-fav-restore.user.js
-   ```
+   - **[从 Greasy Fork 安装](https://greasyfork.org/zh-TW/scripts/578965-bilibili-收藏夹失效视频还原)**（推荐）
+   - **[从 GitHub Raw 安装](https://raw.githubusercontent.com/k0504/bilibili-fav-restore/main/dist/bilibili-fav-restore.user.js)**
 
-3. 安装完成后，Tampermonkey 会定期向同一 URL 检查更新；新版本将自动提示安装。
+   两个入口分发同一份脚本。Greasy Fork 通过 sync 机制定期从 GitHub Raw URL 拉取新版本，延迟约 24 小时。
+
+3. 安装完成后，Tampermonkey 会定期向所选入口检查更新，新版本将自动提示安装。
 
 ## 首次登录
 
