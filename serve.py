@@ -25,7 +25,7 @@ import socketserver
 from functools import partial
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PORT = 8765
+DEFAULT_PORT = 8766
 
 
 class CoreHandler(http.server.SimpleHTTPRequestHandler):

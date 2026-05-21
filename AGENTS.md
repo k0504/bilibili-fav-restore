@@ -23,7 +23,7 @@ Tampermonkey 雙層 userscript：在 B 站網頁版收藏夾頁面把失效視�
 |----|------|---------------|
 | `bilibili-fav-list-fix.user.js` | **dev bootstrap**，TM 安裝目標。fetch core + eval。`@version` 鎖 1.0.0 | |
 | `bilibili-fav-list-fix-core.js` | 主邏輯：sources / resolver / cache / DOM patch / 選單注入 / TV QR login / missing banner | |
-| `serve.py` | 本機 :8765 HTTP server，no-cache header（給 bootstrap 用） | |
+| `serve.py` | 本機 :8766 HTTP server，no-cache header（給 bootstrap 用） | |
 | `build.py` | 把 core 打包成 `dist/bilibili-fav-restore.user.js`（end-user 單檔版） | |
 | `dist/bilibili-fav-restore.user.js` | **end-user 發布物**。GitHub raw URL 對外，TM auto-update。Greasy Fork mirror 從同一 raw URL sync | |
 | `README.md` | 給人類的安裝與開發流程 | |
@@ -41,7 +41,7 @@ Tampermonkey 雙層 userscript：在 B 站網頁版收藏夾頁面把失效視�
 
 ## 跨檔陷阱
 
-1. **port `8765` 寫死兩處** (`serve.py:27` 的 `DEFAULT_PORT` ＋ `bilibili-fav-list-fix.user.js:55` 的 `SERVER_BASE`) —— 改一邊不改另一邊，瀏覽器開的 install URL 與 bootstrap fetch 的 URL 不一致，core 永遠載不到。改了務必順手把 `README.md` 的指令也改掉
+1. **port `8766` 寫死兩處** (`serve.py:28` 的 `DEFAULT_PORT` ＋ `bilibili-fav-list-fix.user.js:58` 的 `SERVER_BASE`) —— 改一邊不改另一邊，瀏覽器開的 install URL 與 bootstrap fetch 的 URL 不一致，core 永遠載不到。改了務必順手把 `README.md` 的指令、`C:\project\PORTS.md` 表格一起改掉（歷史值 8765 因被其他長期 process 佔用，於 2026-05-22 改為 8766）
 
 2. **bootstrap `@grant` 是 core 的權限白名單** —— core 呼叫的每個 `GM_*` API（`GM_setClipboard / GM_openInTab / GM_listValues / GM_setValue / ...`）都要列在 bootstrap header `@grant` 行。漏一個的話 TM 把該函式設為 `undefined`，呼叫時 `ReferenceError`。**改 core 引入新 `GM_*` 用法時，bootstrap `@grant` 必須同 commit 補上**，使用者下次 reload 會被 TM 跳「新增權限」對話框
 

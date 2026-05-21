@@ -55,7 +55,7 @@
 (function () {
     'use strict';
 
-    var SERVER_BASE = 'http://127.0.0.1:8765';
+    var SERVER_BASE = 'http://127.0.0.1:8766';
     var CORE_PATH = '/bilibili-fav-list-fix-core.js';
 
     function showError(msg) {

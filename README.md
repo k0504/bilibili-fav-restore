@@ -51,14 +51,14 @@ bilibili 网页版的收藏夹接口对失效条目仅返回固定占位封面�
 | `dist/bilibili-fav-restore.user.js` | 端用户安装文件。由 `build.py` 从核心代码生成，提交后通过 GitHub raw URL 对外分发。 |
 | `bilibili-fav-list-fix.user.js` | 开发用 bootstrap，`@version` 永久锁定为 `1.0.0`。仅负责从本地 HTTP 服务拉取核心代码并执行，避免每次修改核心都需重新安装 Tampermonkey。 |
 | `bilibili-fav-list-fix-core.js` | 核心代码。包含请求签名、DOM 替换、菜单注入、登录流程、静默丢弃检测等全部逻辑。两套入口共享同一份核心。 |
-| `serve.py` | 本地 HTTP 服务（默认 `127.0.0.1:8765`）。仅供 dev bootstrap 拉取核心代码，端用户无需运行。 |
+| `serve.py` | 本地 HTTP 服务（默认 `127.0.0.1:8766`）。仅供 dev bootstrap 拉取核心代码，端用户无需运行。 |
 | `build.py` | 将核心代码打包为 `dist/bilibili-fav-restore.user.js`，并自动从核心代码中提取 `CORE_VERSION` 写入 `@version`。 |
 
 ### 开发循环
 
 ```bash
 python serve.py
-# 浏览器地址栏访问 http://127.0.0.1:8765/bilibili-fav-list-fix.user.js
+# 浏览器地址栏访问 http://127.0.0.1:8766/bilibili-fav-list-fix.user.js
 # Tampermonkey 弹出安装对话框，确认安装 bootstrap（仅需一次）
 ```
 
@@ -88,7 +88,7 @@ python serve.py
 
 ### bootstrap 安装注意事项
 
-- 必须在浏览器地址栏直接访问 `http://127.0.0.1:8765/bilibili-fav-list-fix.user.js`。Tampermonkey 官网的 `script_installation.php?url=...` 中转页对本地 HTTP 资源不会重定向。
+- 必须在浏览器地址栏直接访问 `http://127.0.0.1:8766/bilibili-fav-list-fix.user.js`。Tampermonkey 官网的 `script_installation.php?url=...` 中转页对本地 HTTP 资源不会重定向。
 - 本地服务返回的 `Content-Type` 必须为 `application/javascript`，`serve.py` 已强制此值。
 - 在 Tampermonkey Dashboard 中将 **Settings → Config mode** 切换为 `Advanced`，并在 **Security → Allow scripts to access cross-origin resources** 中勾选允许。
 
