@@ -63,7 +63,7 @@ def build_header(version):
     """
     lines = [
         '// ==UserScript==',
-        '// @name         Bilibili 收藏夹失效视频还原',
+        '// @name         Bilibili 收藏夹失效视频信息还原',
         '// @name:en      Bilibili Fav Restore',
         '// @namespace    https://github.com/%s/%s' % (GH_USER, GH_REPO),
         '// @version      ' + version,
