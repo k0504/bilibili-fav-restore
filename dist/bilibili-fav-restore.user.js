@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Bilibili 收藏夹失效视频信息还原
+// @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
 // @version      0.8.7
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
+// @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
 // @author       k0504
 // @homepageURL  https://github.com/k0504/bilibili-fav-restore

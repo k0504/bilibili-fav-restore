@@ -63,11 +63,17 @@ def build_header(version):
     """
     lines = [
         '// ==UserScript==',
+        # Locale variants: bare @name/@description 为简体（主要语言）；
+        # @*:zh-TW 提供繁体变体（Tampermonkey 会按浏览器 navigator.language
+        # 自动挑选，zh-TW/zh-HK/zh-MO 命中繁体；其他 locale 落回简体）。
+        # @*:en 保留给英文环境使用者（GF 列表也会按浏览器语言展示）。
         '// @name         Bilibili 收藏夹失效视频信息还原',
+        '// @name:zh-TW   Bilibili 收藏夾失效影片資訊還原',
         '// @name:en      Bilibili Fav Restore',
         '// @namespace    https://github.com/%s/%s' % (GH_USER, GH_REPO),
         '// @version      ' + version,
         '// @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。',
+        '// @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。',
         '// @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.',
         '// @author       %s' % GH_USER,
         '// @homepageURL  https://github.com/%s/%s' % (GH_USER, GH_REPO),

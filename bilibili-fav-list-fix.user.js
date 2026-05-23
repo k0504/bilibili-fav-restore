@@ -1,8 +1,12 @@
 // ==UserScript==
-// @name         Bilibili Fav List Fix (bootstrap)
+// @name         Bilibili 收藏夹失效视频信息还原 (bootstrap)
+// @name:zh-TW   Bilibili 收藏夾失效影片資訊還原 (bootstrap)
+// @name:en      Bilibili Fav List Fix (bootstrap)
 // @namespace    https://github.com/SocialSisterYi/bilibili-API-collect
 // @version      1.0.0
-// @description  Restore real cover / title of invalid (失效) videos on bilibili web favorites pages. Bootstrap loader — fetches latest core logic from local server and runs it. @version 1.0.0 is permanent; never bump unless the bootstrap protocol itself changes.
+// @description  开发用 bootstrap — 从本地 HTTP 服务拉取最新核心代码并执行。`@version 1.0.0` 永久锁定，除非 bootstrap 协议本身变更，否则不要 bump（一旦 bump 使用者要重新确认安装）。
+// @description:zh-TW  開發用 bootstrap — 從本機 HTTP 服務拉取最新核心代碼並執行。`@version 1.0.0` 永久鎖定，除非 bootstrap 協議本身變更，否則不要 bump（一旦 bump 使用者要重新確認安裝）。
+// @description:en  Dev bootstrap — fetches latest core logic from local server and runs it. `@version 1.0.0` is permanent; never bump unless the bootstrap protocol itself changes.
 // @author       you
 // @match        https://space.bilibili.com/*
 // @match        https://www.bilibili.com/list/*
