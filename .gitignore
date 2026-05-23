@@ -20,5 +20,8 @@ mitm_dump/
 # 但無 GF API 可自動同步，入庫只會跟 GF 線上版漂移，所以不追蹤
 GREASYFORK.md
 
+# AGENTS.md 為本機 AI agent 導航文件，不入庫對外
+AGENTS.md
+
 # 注意：dist/ 必須入庫（GitHub raw URL 對 end user 服這檔）
 # 不要把 dist/ 加進來
