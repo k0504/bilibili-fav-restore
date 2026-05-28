@@ -35,7 +35,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.8';
+    var CORE_VERSION = '0.8.10';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -994,6 +994,85 @@
                 catch (e) { warn(src + ' page ' + pn + ' failed:', e.message); break; }
                 if (!page.has_more) break;
                 pn++;
+            }
+        }
+
+        // ─── Phase 1.5: Android flap retry ─────────────────────────────
+        // Bilibili's android API is empirically non-deterministic: ~5% of
+        // avs flap in/out across consecutive walks (same access_key, same
+        // mediaId, seconds apart). Confirmed by 3-walk diagnostic on
+        // mediaId=1687751814: walks returned 888 / 879 / 887 avs from a
+        // claimed total of 923, with 44 avs (5%) appearing in some walks
+        // but not others. Flapping correlates strongly with deactivated
+        // accounts (7.6x over-represented) and short legacy aids — bilibili
+        // is doing eventually-consistent server-side filtering for items
+        // in a boundary state (account suspended / under review / etc).
+        //
+        // Detection: av must satisfy ALL THREE
+        //   1. android missing in pageItems (flap symptom)
+        //   2. public present (confirms the av exists; avoids retrying truly
+        //      missing items where retry won't help)
+        //   3. public's data is degenerate — both cover AND title fail
+        //      QUALITY. This is the crucial guard: VALID videos can also
+        //      flap (android drops them), but their public entry has real
+        //      cover/title so the merge is fine without android. Only the
+        //      INVALID-and-android-flapped case actually benefits from
+        //      retry, and that's exactly the set this filter selects.
+        //
+        // Without guard #3, every page with healthy-but-android-missing
+        // items triggers a wasteful full android walk (~5-8s) and freezes
+        // all loading spinners for the entire patch cycle. With it, normal
+        // browsing pays 0 cost; only patches with actual degenerate-
+        // candidates incur the retry.
+        //
+        // Cost (with guard #3): one extra full android walk (~5-8s) ONLY
+        // when there are real degenerate candidates. Early-exits as soon
+        // as all candidates are recovered (typically pn=1-3).
+        var flapCandidates = (SOURCES.android.enabled())
+            ? todoAvs.filter(function (av) {
+                if (pageItems.has('android|' + av)) return false;
+                var p = pageItems.get('public|' + av);
+                if (!p) return false;
+                // Public has the av — would the merge be degenerate WITHOUT
+                // android? If public alone has good cover OR good title,
+                // merge is fine, no retry needed.
+                var pubCoverOk = QUALITY.cover(p.cover) >= 5;
+                var pubTitleOk = QUALITY.title(p.title) >= 10;
+                return !pubCoverOk && !pubTitleOk;
+            })
+            : [];
+        if (flapCandidates.length) {
+            log('android flap retry for', flapCandidates.length, 'av(s):',
+                flapCandidates.slice(0, 5).join(',') + (flapCandidates.length > 5 ? ',…' : ''));
+            // Wipe android page cache so ensurePage re-issues network calls
+            // instead of returning the cached page Promises from phase 1.
+            // Only touch THIS mediaId's keys; other media's caches are
+            // untouched (unlikely to matter — only one favlist per page —
+            // but safer).
+            var pcKeys = [];
+            pageCache.forEach(function (_, k) { pcKeys.push(k); });
+            for (var ki = 0; ki < pcKeys.length; ki++) {
+                if (pcKeys[ki].indexOf('android|' + mediaId + '|') === 0) {
+                    pageCache.delete(pcKeys[ki]);
+                }
+            }
+            var pn = 1, MAX_PN = 20;
+            while (pn <= MAX_PN) {
+                var allFound = flapCandidates.every(function (av) { return pageItems.has('android|' + av); });
+                if (allFound) { log('android flap retry: all candidates recovered at pn=' + pn); break; }
+                var page;
+                try { page = await ensurePage('android', mediaId, pn); }
+                catch (e) { warn('android flap retry pn ' + pn + ' failed:', e.message); break; }
+                if (!page.has_more) break;
+                pn++;
+            }
+            // Log final outcome for visibility.
+            var stillMissing = flapCandidates.filter(function (av) { return !pageItems.has('android|' + av); });
+            if (stillMissing.length) {
+                log('android flap retry: ' + (flapCandidates.length - stillMissing.length) + '/' + flapCandidates.length
+                    + ' recovered;', stillMissing.length, 'still missing (likely permanent filter, falling through to 3rd-party)');
+            } else {
+                log('android flap retry: ' + flapCandidates.length + '/' + flapCandidates.length + ' recovered');
             }
         }
 
