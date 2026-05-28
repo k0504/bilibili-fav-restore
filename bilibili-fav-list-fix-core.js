@@ -35,7 +35,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.7';
+    var CORE_VERSION = '0.8.8';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -847,6 +847,14 @@
             }
         }
         out._sources = Object.keys(perSource);
+        // Degenerate = neither cover nor title passed QUALITY from any source.
+        // Card will render visually unchanged (placeholder cover + "已失效视频"
+        // text) but with the red marker — easy to confuse with a permanent
+        // 404. Flagged so loadCache can use a short TTL: the most common
+        // cause is Android API's walk-to-walk drop (server returns the av
+        // on some walks, not others), and a fresh walk in ~10 min often
+        // recovers it. Without the short TTL, one bad walk locks in 30 days.
+        if (!out._src_cover && !out._src_title) out._degenerate = true;
         return out;
     }
 
@@ -863,8 +871,13 @@
     //   - changing the merged-item shape (renaming fields etc.)
 
     var CACHE_PREFIX  = 'item:av';
-    var CACHE_VERSION = 4;   // bumped: +xbeibeix source, +_no_source stub
+    var CACHE_VERSION = 5;   // bumped: +_degenerate flag (short TTL on no-cover-no-title merges)
     var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
+    // Short TTL for degenerate merges (no cover + no title from any source).
+    // Android API has walk-to-walk variability — same av sometimes appears
+    // on a page, sometimes doesn't. A 30-day lock-in turns one bad walk
+    // into a permanent failure; 10 min lets the next patchOnce retry.
+    var CACHE_TTL_DEGENERATE_MS = 1000 * 60 * 10;   // 10 min
 
     function loadCache(av) {
         var v = GM_getValue(CACHE_PREFIX + av, null);
@@ -873,7 +886,8 @@
             log('cache av', av, 'version', v._cache_version, '!=', CACHE_VERSION, '— invalidating');
             return null;
         }
-        if (v._cached_at && (Date.now() - v._cached_at > CACHE_TTL_MS)) return null;
+        var ttl = v._degenerate ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+        if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
     function saveCache(av, merged) {
@@ -1581,27 +1595,100 @@
             // chars) wrapped to two lines and the second line overflowed
             // the popper bounds — see git log around this label change.
             key: 'clear-cache', label: '清缓存并重抓',
-            successMsg: '缓存已清除，将于下次扫描时重新抓取',
+            successMsg: '缓存已清除，重新抓取中',
             onClick: function () {
-                // Persistent layer: drop ONLY this av's merged entry.
+                // Cache nuke: GM, in-memory raw rows, paginated promises.
                 clearItemCache(av);
-                // In-memory layer: drop ONLY this av's per-source raw rows.
-                // Don't `.clear()` pageItems — that nukes every visible card's
-                // raw data and makes patchOnce re-flash loading on all of
-                // them, giving the false impression that all caches were
-                // wiped. Other avs short-circuit on loadCache so they never
-                // touch pageItems anyway.
                 Object.keys(SOURCES).forEach(function (src) {
                     pageItems.delete(src + '|' + av);
                 });
-                // pageCache *must* be flushed though: ensurePage dedups by
-                // `${src}|${mediaId}|${pn}` and the stale resolved Promise
-                // won't rewrite pageItems on re-await. Without this, phase 1
-                // sees pageItems still missing this av AND no page Promise to
-                // run → silent no-op. Cost is one paginated refetch; other
-                // avs hit GM cache before phase 1 so they don't pay it.
+                // pageCache holds Promise<page>; must be flushed so the next
+                // patchOnce actually re-fetches Android pages (otherwise the
+                // resolved promise's items list is reused — and that list is
+                // exactly the one that already dropped this av).
                 pageCache.clear();
-                schedule();
+
+                // The hit captured in this closure is from whenever
+                // injectCardMenu was last called — possibly stale by now if
+                // bilibili's SPA re-rendered the card. Operating on stale
+                // refs paints overlays into detached subtrees that the user
+                // never sees. Re-resolve to the LIVE element by hunting for
+                // the card whose link mentions this av's avid or bvid.
+                var bvid = null;
+                try { bvid = avToBv(av); } catch (e) { /* invalid av */ }
+                var sel = 'a[href*="/video/av' + av + '"]'
+                        + (bvid ? ', a[href*="/video/' + bvid + '"]' : '');
+                var liveContainer = null, liveImg = null;
+                document.querySelectorAll(sel).forEach(function (a) {
+                    if (liveContainer) return;
+                    var n = a;
+                    while (n && n !== document.body) {
+                        var img = n.querySelector && n.querySelector('img');
+                        if (img) { liveContainer = n; liveImg = img; return; }
+                        n = n.parentElement;
+                    }
+                });
+                // Fallback to closure hit if live lookup misses (defensive
+                // — should not happen for a card the user just clicked).
+                if (!liveContainer) liveContainer = hit && hit.container;
+                if (!liveImg)       liveImg       = hit && hit.img;
+
+                // Tear down any prior overlay on the LIVE img (rapid
+                // double-click stacks spinners otherwise).
+                if (liveImg) clearLoading({ img: liveImg, container: liveContainer });
+
+                // Reset img: restore the placeholder src if we swapped it,
+                // strip inline styles applied by markPatched / _no_source,
+                // drop marker attrs so findInvalidContainers re-detects.
+                if (liveImg) {
+                    var orig = liveImg.getAttribute('data-fav-fix-original');
+                    if (orig) {
+                        liveImg.src = orig;
+                        liveImg.removeAttribute('data-fav-fix-original');
+                    }
+                    liveImg.style.outline = '';
+                    liveImg.style.outlineOffset = '';
+                    liveImg.style.opacity = '';
+                    liveImg.style.filter = '';
+                    liveImg.removeAttribute('data-fav-fix-marked');
+                    liveImg.removeAttribute('data-fav-fix-loading');
+                }
+                // Reset container: revert any title text we wrote
+                // (recovered title or "（视频已删除）"), drop marker attrs.
+                // Keep `data-fav-fix-tipbound` + bound listeners — they
+                // read __favFixReal live, so the next markPatched picks up
+                // the new payload automatically.
+                if (liveContainer) {
+                    var prevReal = liveContainer.__favFixReal;
+                    var patchedTitles = ['（视频已删除）'];
+                    if (prevReal && prevReal.title) patchedTitles.push(prevReal.title);
+                    var walker = document.createTreeWalker(liveContainer, NodeFilter.SHOW_TEXT, null);
+                    var node;
+                    while ((node = walker.nextNode())) {
+                        var t = node.nodeValue.trim();
+                        if (patchedTitles.indexOf(t) !== -1) {
+                            node.nodeValue = node.nodeValue.replace(t, INVALID_TITLE);
+                        }
+                    }
+                    patchedTitles.forEach(function (pt) {
+                        liveContainer.querySelectorAll('[title="' + pt + '"]').forEach(function (el) {
+                            el.setAttribute('title', INVALID_TITLE);
+                        });
+                    });
+                    liveContainer.removeAttribute('data-fav-fix-marked');
+                    liveContainer.removeAttribute('data-fav-fix-loading');
+                    liveContainer.__favFixReal = null;
+                }
+
+                // Paint spinner on the LIVE img immediately — user sees the
+                // click took effect before any network round-trip.
+                if (liveImg) markLoading({ img: liveImg, container: liveContainer });
+
+                // Fire patchOnce immediately rather than going through
+                // schedule()'s 400ms debounce — the user just told us they
+                // want action now. patchOnce dedups via `data-fav-fix-loading`
+                // so the spinner we just painted won't double-stack.
+                patchOnce().catch(function (e) { warn('clear-cache patchOnce threw:', e); });
             }
         });
         return items;
