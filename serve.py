@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tiny local HTTP server that serves the userscript core file.
+"""Tiny local HTTP server that serves the userscript core (assembled live).
 
 Why this exists:
   Tampermonkey rejects http://127.0.0.1 as an @updateURL (insecure-origin
@@ -12,12 +12,15 @@ Usage:
   python serve.py        # listens on http://127.0.0.1:8766/
   python serve.py 9000   # custom port
 
-The bootstrap fetches /bilibili-fav-list-fix-core.js. Edit that file freely
-— each tab reload pulls the latest version (no Tampermonkey re-touch).
+The bootstrap fetches /bilibili-fav-list-fix-core.js, which this server
+ASSEMBLES on the fly from src/*.js (see bundle.py) — there is no file by that
+name on disk. Edit any src/ module freely; each tab reload pulls the freshly
+assembled core (no build step, no Tampermonkey re-touch).
 
-Only the bootstrap and core files are served (see ALLOWED_PATHS); the repo
-root holds .git/, build.py, etc., and there's no reason to expose the whole
-tree even on loopback.
+Only the bootstrap (a real file) and the virtual core path are served (see
+ALLOWED_PATHS); the repo root holds .git/, build.py, src/, etc., and there's
+no reason to expose the whole tree even on loopback. src/ in particular is
+NOT exposed — only the assembled core is.
 
 Port 8766 (8765 was taken by another long-running process; switched
 2026-05-22). If you change it, update bilibili-fav-list-fix.user.js
@@ -25,21 +28,31 @@ SERVER_BASE and README to match.
 """
 import sys
 import os
+import io
 import hashlib
 import http.server
 import socketserver
 from functools import partial
 
+import bundle
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PORT = 8766
 
+# Virtual path: the core is NOT a file on disk anymore — it is ASSEMBLED on
+# the fly from src/*.js (see bundle.py) so the dev loop stays "edit a src
+# module + reload tab" with no build step. send_head() synthesizes this path;
+# the bootstrap path below is a real file served normally.
+CORE_VIRTUAL_PATH = '/bilibili-fav-list-fix-core.js'
+
 # Whitelist of paths this server will serve. The bootstrap only ever fetches
 # the core; the browser only ever navigates to the bootstrap. Everything else
-# (.git/, build.py, dist/, README, ...) 404s — a whitelist beats blacklisting
-# sensitive prefixes because it can't silently miss a newly-added one.
+# (.git/, build.py, src/, dist/, README, ...) 404s — a whitelist beats
+# blacklisting sensitive prefixes because it can't silently miss a newly-added
+# one. NOTE: src/ is deliberately NOT exposed; only the assembled core is.
 ALLOWED_PATHS = frozenset([
     '/bilibili-fav-list-fix.user.js',
-    '/bilibili-fav-list-fix-core.js',
+    CORE_VIRTUAL_PATH,
 ])
 
 
@@ -71,16 +84,19 @@ class CoreHandler(http.server.SimpleHTTPRequestHandler):
     sys_version = ''
 
     def send_head(self):
-        # Whitelist gate: only the bootstrap + core file are ever served.
+        # Whitelist gate: only the bootstrap + (virtual) core are ever served.
         # Strip query (bootstrap appends ?t=…) and fragment before matching.
         path = self.path.split('?', 1)[0].split('#', 1)[0]
         if path not in ALLOWED_PATHS:
             self.send_error(404, 'Not Found')
             return None
-        # Compute a weak ETag from the file's mtime+size so we can mirror
-        # dl-manager's FastAPI FileResponse, which sends both ETag and
-        # Accept-Ranges. TM has been observed to treat responses without
-        # ETag as "incomplete" on the install-detection path. Cache it
+        # The core is synthesized from src/*.js, not read off disk.
+        if path == CORE_VIRTUAL_PATH:
+            return self._send_core()
+        # Bootstrap: a real file. Compute a weak ETag from the file's mtime+size
+        # so we can mirror dl-manager's FastAPI FileResponse, which sends both
+        # ETag and Accept-Ranges. TM has been observed to treat responses
+        # without ETag as "incomplete" on the install-detection path. Cache it
         # on the instance so end_headers() can emit it.
         try:
             st = os.stat(self.translate_path(self.path))
@@ -90,6 +106,39 @@ class CoreHandler(http.server.SimpleHTTPRequestHandler):
         except OSError:
             self._etag = None
         return super().send_head()
+
+    def _send_core(self):
+        """Assemble the core from src/*.js and serve it from memory.
+
+        Returns the same kind of thing SimpleHTTPRequestHandler.send_head
+        returns for a real file — a readable body object, with the status line
+        and headers already written — so the base do_GET/do_HEAD copy loop
+        works unchanged. Differences from the disk path:
+          - ETag is the CONTENT hash (there is no on-disk mtime to key off).
+          - Content-Type is forced to application/javascript (TM only fires the
+            install/update flow on that type — AGENTS.md gotcha #4).
+          - Content-Length is set, so HTTP/1.1 keep-alive stays on (no
+            Connection: close) — preserves the install-detection round-trip
+            behaviour documented on ThreadedHTTPServer (gotcha #5).
+        """
+        try:
+            body = bundle.build_core_bytes()
+        except bundle.BundleError as e:
+            # src/ vs MANIFEST mismatch (or an unreadable module) would ship a
+            # broken core. Return 500 with the reason and log it, rather than
+            # silently serving a truncated/empty body; the bootstrap surfaces
+            # "core HTTP 500" on the page so the dev notices immediately.
+            sys.stderr.write('[serve] core assembly failed: %s\n' % e)
+            self.send_error(500, 'core assembly failed')
+            return None
+        self._etag = '"%s"' % hashlib.md5(body).hexdigest()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/javascript')
+        self.send_header('Content-Length', str(len(body)))
+        # end_headers() (overridden below) appends Cache-Control / Accept-Ranges
+        # / ETag and writes the terminating blank line.
+        self.end_headers()
+        return io.BytesIO(body)
 
     def end_headers(self):
         self.send_header('Cache-Control', 'no-cache')

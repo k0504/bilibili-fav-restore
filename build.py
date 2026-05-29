@@ -3,12 +3,13 @@
 
 Why this exists:
   The dev workflow uses a two-layer setup — `bilibili-fav-list-fix.user.js`
-  (bootstrap, pinned at @version 1.0.0) fetches `bilibili-fav-list-fix-core.js`
-  from a local `serve.py` and `eval`s it. That's great for iteration (edit
-  core → reload tab) but terrible for end users (they'd have to install
-  Python + run a server).
+  (bootstrap, pinned at @version 1.0.0) fetches the core (virtual path
+  `/bilibili-fav-list-fix-core.js`, assembled from `src/*.js` by `serve.py`)
+  and `eval`s it. That's great for iteration (edit a src module → reload tab)
+  but terrible for end users (they'd have to install Python + run a server).
 
-  This script bundles the SAME core into a self-contained userscript with
+  This script assembles the SAME core (via `bundle.build_core()`, the single
+  source of truth shared with serve.py) into a self-contained userscript with
   GitHub-raw @updateURL, so end users can install via a single Tampermonkey
   link and TM will auto-update them when we commit a new dist/.
 
@@ -19,16 +20,16 @@ Run:
   python build.py
 
 Cross-file invariants:
-  - `@version` in dist/ MUST equal `CORE_VERSION` in core.js. TM's auto-update
-    only fires when @version increases — bumping core but not rebuilding dist
-    means end users get stuck.
+  - `@version` in dist/ MUST equal `CORE_VERSION` (defined in
+    `src/01-constants.js`). TM's auto-update only fires when @version increases
+    — bumping core but not rebuilding dist means end users get stuck.
   - `@grant` / `@match` / `@connect` are NO LONGER hand-copied here. They are
     PARSED from the bootstrap (bilibili-fav-list-fix.user.js) — the single
     source of truth — so the two lists can't drift. `@connect` drops
     `127.0.0.1` / `localhost` (the single-file build has no local server).
-  - A lint step (lint_grants) fails the build if core.js calls a GM_* API
-    that the bootstrap's @grant block doesn't cover, so a forgotten @grant
-    surfaces at build time instead of as a runtime ReferenceError.
+  - A lint step (lint_grants) fails the build if the assembled core calls a
+    GM_* API that the bootstrap's @grant block doesn't cover, so a forgotten
+    @grant surfaces at build time instead of as a runtime ReferenceError.
   - Do NOT include the bootstrap's eval/fetch logic in dist/. The core is
     inlined directly — it runs as the userscript body, not via eval.
 """
@@ -36,8 +37,9 @@ import os
 import re
 import sys
 
+import bundle
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
-CORE_PATH = os.path.join(ROOT, 'bilibili-fav-list-fix-core.js')
 BOOTSTRAP_PATH = os.path.join(ROOT, 'bilibili-fav-list-fix.user.js')
 OUT_DIR   = os.path.join(ROOT, 'dist')
 OUT_PATH  = os.path.join(OUT_DIR, 'bilibili-fav-restore.user.js')
@@ -51,7 +53,8 @@ RAW_BASE = 'https://raw.githubusercontent.com/%s/%s/main/dist' % (GH_USER, GH_RE
 
 
 def extract_core_version(src):
-    """Pull `var CORE_VERSION = 'x.y.z';` out of core.js."""
+    """Pull `var CORE_VERSION = 'x.y.z';` out of the assembled core
+    (defined in src/01-constants.js)."""
     m = re.search(r"var\s+CORE_VERSION\s*=\s*['\"]([^'\"]+)['\"]", src)
     if not m:
         sys.stderr.write('FATAL: could not find CORE_VERSION in core.js\n')
@@ -147,7 +150,7 @@ def build_header(version, bootstrap_src):
         '',
         '/*',
         ' * AUTO-GENERATED — do not edit by hand.',
-        ' * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = ' + version + ')',
+        ' * Source: src/*.js assembled by bundle.py (CORE_VERSION = ' + version + ')',
         ' * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.',
         ' * Regenerate with: python build.py',
         ' *',
@@ -161,8 +164,11 @@ def build_header(version, bootstrap_src):
 
 
 def main():
-    with open(CORE_PATH, 'r', encoding='utf-8') as f:
-        core_src = f.read()
+    try:
+        core_src = bundle.build_core()
+    except bundle.BundleError as e:
+        sys.stderr.write('FATAL: core assembly failed: ' + str(e) + '\n')
+        sys.exit(1)
     with open(BOOTSTRAP_PATH, 'r', encoding='utf-8') as f:
         bootstrap_src = f.read()
 

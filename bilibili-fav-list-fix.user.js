@@ -40,9 +40,10 @@
  *      Only job: fetch the core JS from the local server and eval it.
  *      NEVER bump @version — bumping forces the user to re-confirm install.
  *
- *   2. bilibili-fav-list-fix-core.js — all the real logic.
- *      Edit freely; reload the bilibili tab to pick up changes.
- *      No Tampermonkey re-touch needed.
+ *   2. The core (served at /bilibili-fav-list-fix-core.js) — all the real
+ *      logic, assembled from src/*.js by serve.py (see bundle.py). Edit any
+ *      src/ module; reload the bilibili tab to pick up changes. No
+ *      Tampermonkey re-touch needed.
  *
  * Why: TM rejects http://127.0.0.1 as @updateURL (insecure-origin policy),
  * so an auto-updating userscript pointing at the local server is impossible.

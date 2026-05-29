@@ -38,8 +38,8 @@ bilibili 网页版的收藏夹接口对失效条目仅返回固定占位封面�
 
 - 仅支持本人收藏夹或公开收藏夹。私密收藏夹受 API 鉴权限制无法读取。
 - 脚本返回的「原始封面」托管于 bilibili CDN。若 bilibili 在服务端清除该资源文件，脚本无法恢复。
-- 每页上限 20 条，最多翻阅 30 页。如需调整，修改 `bilibili-fav-list-fix-core.js` 中的 `MAX_PN`。
-- 若 API 返回 `-3` / `-101` / `-663`，通常表示 appkey 或 appsec 已被 bilibili 更新，需重新抓取并替换核心代码顶端常量。
+- 每页 20 条，最多翻阅 50 页（约 1000 条）。如需调整，修改 `src/01-constants.js` 中的 `MAX_PAGE_WALK`。
+- 若 API 返回 `-3` / `-101` / `-663`，通常表示 appkey 或 appsec 已被 bilibili 更新，需重新抓取并替换 `src/01-constants.js` 中的 appkey / appsec 常量。
 - 第三方归档源（biliplus、xbeibeix、jijidown）的可用性与命中率不在脚本控制范围内。
 
 ## 开发
@@ -50,9 +50,10 @@ bilibili 网页版的收藏夹接口对失效条目仅返回固定占位封面�
 | ---- | ---- |
 | `dist/bilibili-fav-restore.user.js` | 端用户安装文件。由 `build.py` 从核心代码生成，提交后通过 GitHub raw URL 对外分发。 |
 | `bilibili-fav-list-fix.user.js` | 开发用 bootstrap，`@version` 永久锁定为 `1.0.0`。仅负责从本地 HTTP 服务拉取核心代码并执行，避免每次修改核心都需重新安装 Tampermonkey。 |
-| `bilibili-fav-list-fix-core.js` | 核心代码。包含请求签名、DOM 替换、菜单注入、登录流程、静默丢弃检测等全部逻辑。两套入口共享同一份核心。 |
-| `serve.py` | 本地 HTTP 服务（默认 `127.0.0.1:8766`）。仅供 dev bootstrap 拉取核心代码，端用户无需运行。 |
-| `build.py` | 将核心代码打包为 `dist/bilibili-fav-restore.user.js`，并自动从核心代码中提取 `CORE_VERSION` 写入 `@version`。 |
+| `src/*.js` | 核心代码，按关注点拆分为多个模块（签名、DOM 替换、菜单注入、登录流程、静默丢弃检测等）。两套入口共享同一份核心。各模块职责详见 `AGENTS.md` 的「src/ 模块地图」。 |
+| `bundle.py` | 核心代码组装的单一来源。`MANIFEST` 定义模块加载顺序，将 `src/*.js` 拼接还原为单一 IIFE；`serve.py` 与 `build.py` 共享此函数，保证开发与发布产物一致。 |
+| `serve.py` | 本地 HTTP 服务（默认 `127.0.0.1:8766`）。响应 bootstrap 请求时即时调用 `bundle.py` 组装核心代码（磁盘上无单文件核心），端用户无需运行。 |
+| `build.py` | 将核心代码（经 `bundle.py` 组装）打包为 `dist/bilibili-fav-restore.user.js`，并自动从中提取 `CORE_VERSION` 写入 `@version`。 |
 
 ### 开发循环
 
@@ -62,13 +63,13 @@ python serve.py
 # Tampermonkey 弹出安装对话框，确认安装 bootstrap（仅需一次）
 ```
 
-随后编辑 `bilibili-fav-list-fix-core.js`，刷新任意收藏夹页面即可生效。bootstrap 每次都会附加 cache-bust 参数，无需手动清除缓存。
+随后编辑 `src/` 下的任一模块，刷新任意收藏夹页面即可生效（`serve.py` 每次请求都会重新组装核心代码，无需构建步骤）。bootstrap 每次都会附加 cache-bust 参数，无需手动清除缓存。
 
 ### 发布
 
-1. 修改 `bilibili-fav-list-fix-core.js` 顶端的 `CORE_VERSION`。Tampermonkey 仅在版本号增大时触发自动更新。
+1. 修改 `src/01-constants.js` 中的 `CORE_VERSION`。Tampermonkey 仅在版本号增大时触发自动更新。
 2. 运行 `python build.py` 重新生成 `dist/bilibili-fav-restore.user.js`。
-3. 提交核心代码与 `dist/` 目录并推送到 GitHub。Tampermonkey 通常在 24 小时内为端用户拉取新版本。
+3. 提交 `src/` 与 `dist/` 目录并推送到 GitHub。Tampermonkey 通常在 24 小时内为端用户拉取新版本。
 
 ### 调试接口
 

@@ -37,7 +37,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.17)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.8.17)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
