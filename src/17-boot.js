@@ -105,6 +105,13 @@
         clearItemCache: clearItemCache,
         resolveItems: resolveItems,
         ensurePage: ensurePage,
+        detectMediaId: detectMediaId,
+        // Manually drive a background android flap-recovery pass for a set of
+        // avs (loop-until-dry; see runFlapRecovery). Useful for verifying the
+        // recovery path, e.g.:
+        //   __biliFavFix.runFlapRecovery(__biliFavFix.detectMediaId(), ['12345'])
+        // No-op if another pass is already running.
+        runFlapRecovery: runFlapRecovery,
         // DOM-layer internals, exposed for diagnostics/verification (same
         // spirit as resolveItems/ensurePage above): inspect what the scanner
         // detects and drive a single card's patch in isolation.

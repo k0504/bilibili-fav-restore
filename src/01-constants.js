@@ -27,6 +27,24 @@
     // than emit a false positive.
     var MAX_PAGE_WALK = 50;
 
+    // ─── Android flap recovery (background) ─────────────────────────────
+    // The android fav endpoint is eventually-consistent: ~5% of invalid
+    // items drop in/out across consecutive walks (same access_key, same
+    // mediaId, seconds apart — confirmed by a 3-walk diagnostic returning
+    // 888 / 879 / 887 of a claimed 923). Crucially the drop is NOT uniform:
+    // deactivated-account / short-legacy-aid items are 7.6x over-represented,
+    // so the stubborn subset misses far more than 5% per walk. A single extra
+    // walk (the old synchronous "phase 1.5") only recovered the easy half and
+    // froze every loading spinner for its ~5-8s. The statistically-correct
+    // fix is to UNION several independent walks — each walk is a fresh server
+    // sample, so P(still missing after N) ≈ (per-walk miss)^N — and to run it
+    // in the BACKGROUND so first paint is never blocked (runFlapRecovery in
+    // 08-resolver.js). These three bound that loop so it can't walk forever
+    // against items under genuinely-permanent server-side filtering:
+    var MAX_FLAP_WALKS      = 4;            // hard cap on background android re-walks
+    var FLAP_DRY_ROUNDS     = 2;            // stop after N consecutive walks recover 0 new
+    var FLAP_TIME_BUDGET_MS = 60 * 1000;    // overall wall-clock ceiling for the loop
+
     // One bilibili fav "card" across the modern + legacy layouts. Single
     // source of truth shared by findInvalidContainers Strategy 2 (scope the
     // title-text scan to cards instead of the whole document) and stats()

@@ -66,12 +66,15 @@
     // seconds; schedule()'s 400ms debounce clears pendingTick the instant the
     // timer fires, so a later observer tick (or the clear-cache menu, which
     // calls patchOnce directly) could start a SECOND run while the first is
-    // still awaiting. Concurrent runs share pageCache/pageItems and the flap-
-    // retry path even deletes android page-cache keys mid-walk, so they can
-    // clobber each other. Serialize here: if a run is in flight, mark dirty
-    // and let the current run loop once more when it finishes (so the trigger
-    // that arrived mid-run — e.g. a clear-cache that just nuked the cache —
-    // is never dropped).
+    // still awaiting. Concurrent runs share pageCache/pageItems and could
+    // clobber each other mid-walk. Serialize here: if a run is in flight, mark
+    // dirty and let the current run loop once more when it finishes (so the
+    // trigger that arrived mid-run — e.g. a clear-cache that just nuked the
+    // cache, or the background flap recovery calling schedule() after it
+    // upgrades a recovered item — is never dropped). The background flap loop
+    // (runFlapRecovery) itself is NOT serialized by this guard: it runs
+    // outside patchOnce and only writes pageItems (never pageCache), so it
+    // can't corrupt a concurrent foreground walk.
     var _patchInFlight = false;
     var _patchDirty = false;
     async function patchOnce() {

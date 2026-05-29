@@ -103,84 +103,18 @@
             }
         }
 
-        // ─── Phase 1.5: Android flap retry ─────────────────────────────
-        // Bilibili's android API is empirically non-deterministic: ~5% of
-        // avs flap in/out across consecutive walks (same access_key, same
-        // mediaId, seconds apart). Confirmed by 3-walk diagnostic on
-        // mediaId=1687751814: walks returned 888 / 879 / 887 avs from a
-        // claimed total of 923, with 44 avs (5%) appearing in some walks
-        // but not others. Flapping correlates strongly with deactivated
-        // accounts (7.6x over-represented) and short legacy aids — bilibili
-        // is doing eventually-consistent server-side filtering for items
-        // in a boundary state (account suspended / under review / etc).
-        //
-        // Detection: av must satisfy ALL THREE
-        //   1. android missing in pageItems (flap symptom)
-        //   2. public present (confirms the av exists; avoids retrying truly
-        //      missing items where retry won't help)
-        //   3. public's data is degenerate — both cover AND title fail
-        //      QUALITY. This is the crucial guard: VALID videos can also
-        //      flap (android drops them), but their public entry has real
-        //      cover/title so the merge is fine without android. Only the
-        //      INVALID-and-android-flapped case actually benefits from
-        //      retry, and that's exactly the set this filter selects.
-        //
-        // Without guard #3, every page with healthy-but-android-missing
-        // items triggers a wasteful full android walk (~5-8s) and freezes
-        // all loading spinners for the entire patch cycle. With it, normal
-        // browsing pays 0 cost; only patches with actual degenerate-
-        // candidates incur the retry.
-        //
-        // Cost (with guard #3): one extra full android walk (~5-8s) ONLY
-        // when there are real degenerate candidates. Early-exits as soon
-        // as all candidates are recovered (typically pn=1-3).
-        var flapCandidates = (SOURCES.android.enabled())
-            ? todoAvs.filter(function (av) {
-                if (pageItems.has('android|' + av)) return false;
-                var p = pageItems.get('public|' + av);
-                if (!p) return false;
-                // Public has the av — would the merge be degenerate WITHOUT
-                // android? If public alone has good cover OR good title,
-                // merge is fine, no retry needed.
-                var pubCoverOk = QUALITY.cover(p.cover) >= 5;
-                var pubTitleOk = QUALITY.title(p.title) >= 10;
-                return !pubCoverOk && !pubTitleOk;
-            })
-            : [];
-        if (flapCandidates.length) {
-            log('android flap retry for', flapCandidates.length, 'av(s):',
-                flapCandidates.slice(0, 5).join(',') + (flapCandidates.length > 5 ? ',…' : ''));
-            // Wipe android page cache so ensurePage re-issues network calls
-            // instead of returning the cached page Promises from phase 1.
-            // Only touch THIS mediaId's keys; other media's caches are
-            // untouched (unlikely to matter — only one favlist per page —
-            // but safer).
-            var pcKeys = [];
-            pageCache.forEach(function (_, k) { pcKeys.push(k); });
-            for (var ki = 0; ki < pcKeys.length; ki++) {
-                if (pcKeys[ki].indexOf('android|' + mediaId + '|') === 0) {
-                    pageCache.delete(pcKeys[ki]);
-                }
-            }
-            var pn = 1, MAX_PN = MAX_PAGE_WALK;
-            while (pn <= MAX_PN) {
-                var allFound = flapCandidates.every(function (av) { return pageItems.has('android|' + av); });
-                if (allFound) { log('android flap retry: all candidates recovered at pn=' + pn); break; }
-                var page;
-                try { page = await ensurePage('android', mediaId, pn); }
-                catch (e) { warn('android flap retry pn ' + pn + ' failed:', e.message); break; }
-                if (!page.has_more) break;
-                pn++;
-            }
-            // Log final outcome for visibility.
-            var stillMissing = flapCandidates.filter(function (av) { return !pageItems.has('android|' + av); });
-            if (stillMissing.length) {
-                log('android flap retry: ' + (flapCandidates.length - stillMissing.length) + '/' + flapCandidates.length
-                    + ' recovered;', stillMissing.length, 'still missing (likely permanent filter, falling through to 3rd-party)');
-            } else {
-                log('android flap retry: ' + flapCandidates.length + '/' + flapCandidates.length + ' recovered');
-            }
-        }
+        // ─── Phase 1.5 (REMOVED — now background) ──────────────────────
+        // The android fav endpoint is eventually-consistent (~5% of invalid
+        // items flap in/out per walk; deactivated-account items 7.6x over-
+        // represented — see MAX_FLAP_WALKS in 01-constants.js for the data).
+        // This used to do ONE synchronous extra android walk here, which (a)
+        // only recovered the easy half of the flappers and (b) froze every
+        // loading spinner for its ~5-8s. It is now a BACKGROUND loop-until-dry
+        // (runFlapRecovery, kicked off at the end of this function) that does
+        // several independent walks and re-patches recovered cards in place —
+        // so first paint is never blocked and the stubborn subset gets the
+        // multiple samples it statistically needs. Phase 2 (3rd-party) still
+        // runs synchronously below so first paint has a best-available cover.
 
         // ─── Phase 2: per-av sources (biliplus, xbeibeix, jijidown) ───
         // Only query 3rd-party archives for avs whose cover OR title is
@@ -275,6 +209,126 @@
             saveCache(av, merged);
             result.set(av, merged);
         });
+
+        // ─── Background: recover stubborn android flappers ───────────────
+        // (replaces the old synchronous phase 1.5; see runFlapRecovery below)
+        // Candidates = items STILL degenerate after phase 1 + phase 2, i.e.
+        // no source produced a usable cover or title. For these the android
+        // snapshot is the only realistic recovery and android's per-walk
+        // flapping means more independent walks materially raise the hit rate
+        // (items 3rd-party already saved are not degenerate, so they're never
+        // chased here). Fire-and-forget: the caller paints from `result`
+        // immediately; recovered cards are re-patched in place as walks land.
+        if (SOURCES.android.enabled()) {
+            var bgCandidates = todoAvs.filter(function (av) {
+                var m = result.get(av);
+                return m && m._degenerate;
+            });
+            if (bgCandidates.length) {
+                runFlapRecovery(mediaId, bgCandidates)
+                    .catch(function (e) { warn('flap-bg threw:', e && e.message); });
+            }
+        }
+
         return result;
+    }
+
+    // ─── Background android flap recovery (loop-until-dry) ───────────────
+    // Re-walks the android fav endpoint several times for the still-degenerate
+    // candidates, UNIONing each fresh server sample into pageItems. Each walk
+    // is a new chance to catch an item the previous walk's eventually-consistent
+    // filtering dropped (see MAX_FLAP_WALKS in 01-constants.js). Bounded by
+    // MAX_FLAP_WALKS / FLAP_DRY_ROUNDS / FLAP_TIME_BUDGET_MS so it converges
+    // and never hammers truly-permanent filtering.
+    //
+    // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
+    // merge and call schedule(). The still-degenerate cards remain detectable
+    // by findInvalidContainers Strategy 2 (their title is still "已失效视频"),
+    // and loadCache now returns the good merge, so patchOnce's fast path swaps
+    // cover+title in place — no stored DOM hits to go stale across bilibili's
+    // virtualized scroll, no spinner re-flash (recovered avs hit the cache
+    // fast path, not the resolver).
+    //
+    // Concurrency / race notes:
+    //   - Single loop at a time (_flapBgRunning). Re-entry is a no-op: still-
+    //     degenerate cards are short-TTL cached and fast-pathed, so a later
+    //     patchOnce won't re-enter the resolver for them while this runs.
+    //   - Walks call SOURCES.android.fetchPage DIRECTLY (not ensurePage) and
+    //     write only pageItems — never pageCache. This deliberately bypasses
+    //     the page-promise cache (we WANT a fresh sample each round) AND avoids
+    //     racing a concurrent foreground ensurePage walk that shares pageCache.
+    //     pageItems writes are same-shaped overwrites, safe under JS's single
+    //     thread (no await mid-write).
+    //   - Bails the instant the folder changes (detectMediaId() !== mediaId);
+    //     dropAllInMemory() on SPA folder-switch clears pageItems out from
+    //     under us, which is fine — we re-check before each page and each walk.
+    var _flapBgRunning = false;
+    async function runFlapRecovery(mediaId, candidates) {
+        if (_flapBgRunning) return;
+        if (!candidates || !candidates.length) return;
+        if (!SOURCES.android.enabled()) return;
+        _flapBgRunning = true;
+        var pending = new Set(candidates.map(String));
+        var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
+        var walk = 0, dry = 0;
+        try {
+            log('flap-bg: start', pending.size, 'candidate(s):',
+                Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
+            while (pending.size && walk < MAX_FLAP_WALKS && dry < FLAP_DRY_ROUNDS) {
+                if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
+                if (Date.now() > deadline)       { log('flap-bg: time budget exhausted'); break; }
+                walk++;
+
+                // One fresh android walk straight into pageItems.
+                var pn = 1;
+                while (pn <= MAX_PAGE_WALK) {
+                    if (detectMediaId() !== mediaId || Date.now() > deadline) break;
+                    var allFound = true;
+                    pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
+                    if (allFound) break;
+                    var page;
+                    try { page = await SOURCES.android.fetchPage({ mediaId: mediaId, pn: pn }); }
+                    catch (e) { warn('flap-bg walk ' + walk + ' pn ' + pn + ' failed:', e.message); break; }
+                    (page.list || []).forEach(function (it) {
+                        if (it && it.oid != null) pageItems.set('android|' + it.oid, it);
+                    });
+                    if (!page.has_more) break;
+                    pn++;
+                }
+
+                // Promote any candidate android now covers with usable data.
+                var recovered = [];
+                Array.from(pending).forEach(function (av) {
+                    var aItem = pageItems.get('android|' + av);
+                    if (!aItem) return;
+                    if (QUALITY.cover(aItem.cover) < 5 && QUALITY.title(aItem.title) < 10) return;
+                    var perSource = {};
+                    Object.keys(SOURCES).forEach(function (s) {
+                        var it = pageItems.get(s + '|' + av);
+                        if (it) perSource[s] = it;
+                    });
+                    var merged = mergeBySource(perSource);
+                    if (merged._degenerate) return;   // still no good cover/title — keep trying
+                    saveCache(av, merged);
+                    pending.delete(av);
+                    recovered.push(av);
+                });
+
+                if (recovered.length) {
+                    dry = 0;
+                    log('flap-bg walk ' + walk + ': recovered', recovered.length,
+                        '→ re-patch;', pending.size, 'left');
+                    // Upgrade on-screen cards via the normal fast path.
+                    schedule();
+                } else {
+                    dry++;
+                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_DRY_ROUNDS + ')');
+                }
+            }
+            log('flap-bg: done after', walk, 'walk(s);', pending.size,
+                'still unrecovered (fall through to 3rd-party / permanent filter)');
+        } finally {
+            _flapBgRunning = false;
+        }
     }
 

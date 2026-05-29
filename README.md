@@ -67,7 +67,7 @@ python serve.py
 
 ### 发布
 
-1. 修改 `src/01-constants.js` 中的 `CORE_VERSION`。Tampermonkey 仅在版本号增大时触发自动更新。
+1. 修改 `src/00-prologue.js` 中的 `CORE_VERSION`。Tampermonkey 仅在版本号增大时触发自动更新。
 2. 运行 `python build.py` 重新生成 `dist/bilibili-fav-restore.user.js`。
 3. 提交 `src/` 与 `dist/` 目录并推送到 GitHub。Tampermonkey 通常在 24 小时内为端用户拉取新版本。
 
