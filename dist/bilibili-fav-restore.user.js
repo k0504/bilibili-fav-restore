@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.8.15
+// @version      0.8.16
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -37,7 +37,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.15)
+ * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.16)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -82,7 +82,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.15';
+    var CORE_VERSION = '0.8.16';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -310,17 +310,33 @@
                 headers: opts.headers || { 'User-Agent': 'Mozilla/5.0 BiliDroid/8.94.0' },
                 timeout: timeoutMs,
                 onload: function (resp) {
+                    var text = resp.responseText;
                     if (opts.raw) {
                         // Raw mode: caller wants the response body verbatim
                         // (HTML scraping / non-JSON sources like xbeibeix).
                         // Also surface the final URL so callers can detect
                         // server-side redirects (e.g. xbeibeix bouncing back
                         // to its landing page when an av isn't archived).
-                        resolve({ status: resp.status, body: resp.responseText, finalUrl: resp.finalUrl || url });
+                        resolve({ status: resp.status, body: text, finalUrl: resp.finalUrl || url });
                         return;
                     }
-                    try { resolve(JSON.parse(resp.responseText)); }
-                    catch (e) { reject(new Error('JSON parse failed: ' + e.message + ' body=' + resp.responseText.slice(0, 200))); }
+                    // Some responses arrive with no text body — an empty 204,
+                    // an opaque/blocked response, or a GM build that leaves
+                    // responseText undefined for certain statuses. Guard
+                    // BEFORE JSON.parse AND before building the error string:
+                    // the old code did `resp.responseText.slice(0, 200)` inside
+                    // the parse-failure catch, which itself threw a TypeError
+                    // when responseText was undefined. That throw escaped as an
+                    // *uncaught* error in GM's onload (reject was never reached),
+                    // so the promise never rejected — it hung until the
+                    // client-side guard fired timeoutMs+500 later. Turn it into
+                    // a clean rejection the caller's .catch already handles.
+                    if (typeof text !== 'string') {
+                        reject(new Error('empty/non-text response (status=' + resp.status + '): ' + url));
+                        return;
+                    }
+                    try { resolve(JSON.parse(text)); }
+                    catch (e) { reject(new Error('JSON parse failed: ' + e.message + ' body=' + text.slice(0, 200))); }
                 },
                 onerror: function () { reject(new Error('network error: ' + url)); },
                 ontimeout: function () { reject(new Error('timeout: ' + url)); }
