@@ -35,7 +35,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.12';
+    var CORE_VERSION = '0.8.13';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -272,15 +272,18 @@
         });
         // Pad client-side guard by 500ms so the underlying GM timer wins
         // for legitimate timeouts (cleaner error message), and we only
-        // catch the pathological stall case.
-        return Promise.race([
-            underlying,
-            new Promise(function (_, rej) {
-                setTimeout(function () {
-                    rej(new Error('client-side timeout (' + timeoutMs + 'ms+500): ' + url));
-                }, timeoutMs + 500);
-            })
-        ]);
+        // catch the pathological stall case. Clear the guard once the race
+        // settles so a successful request doesn't leave a live timer pending
+        // for timeoutMs+500 (every call would otherwise leak one).
+        var guardTimer = null;
+        var guard = new Promise(function (_, rej) {
+            guardTimer = setTimeout(function () {
+                rej(new Error('client-side timeout (' + timeoutMs + 'ms+500): ' + url));
+            }, timeoutMs + 500);
+        });
+        return Promise.race([underlying, guard]).finally(function () {
+            if (guardTimer) clearTimeout(guardTimer);
+        });
     }
 
     function gmPostForm(url, body) {
@@ -314,6 +317,9 @@
     function clearAuth() {
         GM_deleteValue('access_key');
         GM_deleteValue('access_key_ts');
+        // Also drop the mode so getAuth() falls back to its 'tv' default
+        // after logout instead of retaining a stale 'android'/'tv' choice.
+        GM_deleteValue('auth_mode');
     }
 
     function appkeyFor(mode) { return mode === 'android' ? AND_APPKEY : TV_APPKEY; }
@@ -2247,8 +2253,12 @@
             'padding:6px 0'
         ].join(';');
         body.innerHTML = missing.map(function (m) {
-            var av = String(m.id);
-            var bv = m.bvid || '';
+            // esc av/bvid before interpolating into HTML text and href. The
+            // source is bilibili's ids endpoint (format-constrained), so this
+            // is defense in depth rather than a known injection — but every
+            // other innerHTML path in this file escapes; keep it uniform.
+            var av = esc(String(m.id));
+            var bv = esc(m.bvid || '');
             var videoUrl = bv ? 'https://www.bilibili.com/video/' + bv
                               : 'https://www.bilibili.com/video/av' + av;
             return ''

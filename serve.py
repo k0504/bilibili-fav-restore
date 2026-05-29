@@ -9,13 +9,19 @@ Why this exists:
   server every time a matched page loads.
 
 Usage:
-  python serve.py        # listens on http://127.0.0.1:8765/
+  python serve.py        # listens on http://127.0.0.1:8766/
   python serve.py 9000   # custom port
 
 The bootstrap fetches /bilibili-fav-list-fix-core.js. Edit that file freely
 — each tab reload pulls the latest version (no Tampermonkey re-touch).
 
-Port 8765 chosen to avoid clashing with dl-manager (which uses 8000).
+Only the bootstrap and core files are served (see ALLOWED_PATHS); the repo
+root holds .git/, build.py, etc., and there's no reason to expose the whole
+tree even on loopback.
+
+Port 8766 (8765 was taken by another long-running process; switched
+2026-05-22). If you change it, update bilibili-fav-list-fix.user.js
+SERVER_BASE and README to match.
 """
 import sys
 import os
@@ -26,6 +32,15 @@ from functools import partial
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PORT = 8766
+
+# Whitelist of paths this server will serve. The bootstrap only ever fetches
+# the core; the browser only ever navigates to the bootstrap. Everything else
+# (.git/, build.py, dist/, README, ...) 404s — a whitelist beats blacklisting
+# sensitive prefixes because it can't silently miss a newly-added one.
+ALLOWED_PATHS = frozenset([
+    '/bilibili-fav-list-fix.user.js',
+    '/bilibili-fav-list-fix-core.js',
+])
 
 
 class CoreHandler(http.server.SimpleHTTPRequestHandler):
@@ -56,6 +71,12 @@ class CoreHandler(http.server.SimpleHTTPRequestHandler):
     sys_version = ''
 
     def send_head(self):
+        # Whitelist gate: only the bootstrap + core file are ever served.
+        # Strip query (bootstrap appends ?t=…) and fragment before matching.
+        path = self.path.split('?', 1)[0].split('#', 1)[0]
+        if path not in ALLOWED_PATHS:
+            self.send_error(404, 'Not Found')
+            return None
         # Compute a weak ETag from the file's mtime+size so we can mirror
         # dl-manager's FastAPI FileResponse, which sends both ETag and
         # Accept-Ranges. TM has been observed to treat responses without
