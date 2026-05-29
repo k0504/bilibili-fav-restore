@@ -35,7 +35,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.13';
+    var CORE_VERSION = '0.8.14';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -82,6 +82,15 @@
     // collections; larger ones skip the (unreliable) missing banner rather
     // than emit a false positive.
     var MAX_PAGE_WALK = 50;
+
+    // One bilibili fav "card" across the modern + legacy layouts. Single
+    // source of truth shared by findInvalidContainers Strategy 2 (scope the
+    // title-text scan to cards instead of the whole document) and stats()
+    // (card count). If bilibili ships a new card class, add it HERE once and
+    // both consumers pick it up. (Strategy 1's placeholder-img scan is
+    // class-independent, so a missing class here at worst loses the SVG-
+    // placeholder fallback for that layout, not the common <img> path.)
+    var CARD_SELECTOR = '.bili-video-card, .fav-video-card, .small-item';
 
     // Settings (overridable via menu commands).
     var DEBUG = !!GM_getValue('debug', false);
@@ -1242,17 +1251,34 @@
         // Strategy 2 (fallback): titles that match "已失效视频" exactly.
         // Only used to detect items whose cover URL doesn't include the
         // placeholder token (some pages render an inline SVG instead).
+        //
+        // Scope the scan to fav cards (CARD_SELECTOR) instead of every
+        // p/span/div/a in the document. The old全-document querySelectorAll
+        // returned thousands of nodes (sidebar / nav / recs / footer) and ran
+        // on every debounced observer tick — the heaviest single step in the
+        // patch cycle. Cards are ~20-40 per page, so this is one to two orders
+        // of magnitude fewer nodes. Container resolution (walk up to the
+        // nearest /video/ link ancestor) is kept identical to Strategy 1 so
+        // the two strategies produce the SAME container object for a card and
+        // the dedupe below still collapses them.
         var titleHits = [];
-        var allText = document.querySelectorAll('p, span, div, a');
-        for (var i = 0; i < allText.length; i++) {
-            var el = allText[i];
-            if (el.children.length === 0 && el.textContent.trim() === INVALID_TITLE) {
-                var n = el;
-                while (n && n !== document.body) {
-                    var link = n.querySelector && n.querySelector('a[href*="/video/"]');
-                    if (link) { titleHits.push({ container: n, img: n.querySelector('img'), link: link, titleEl: el }); break; }
-                    n = n.parentElement;
+        var cards = document.querySelectorAll(CARD_SELECTOR);
+        for (var ci = 0; ci < cards.length; ci++) {
+            var card = cards[ci];
+            var cand = card.querySelectorAll('p, span, div, a');
+            var titleEl = null;
+            for (var k = 0; k < cand.length; k++) {
+                if (cand[k].children.length === 0 && cand[k].textContent.trim() === INVALID_TITLE) {
+                    titleEl = cand[k];
+                    break;
                 }
+            }
+            if (!titleEl) continue;
+            var n = titleEl;
+            while (n && n !== document.body) {
+                var link = n.querySelector && n.querySelector('a[href*="/video/"]');
+                if (link) { titleHits.push({ container: n, img: n.querySelector('img'), link: link, titleEl: titleEl }); break; }
+                n = n.parentElement;
             }
         }
 
@@ -2742,9 +2768,9 @@
         sources: SOURCES,
         // stats() returns a quick health check: cache sizes + last patch result
         stats: function () {
-            // bilibili's modern fav UI uses .bili-video-card; older layouts
-            // use other names. Multi-selector covers both.
-            var cardCount = document.querySelectorAll('.bili-video-card, .fav-video-card, .small-item').length;
+            // Card count via the shared CARD_SELECTOR (same list Strategy 2
+            // scopes its scan to) so the two never drift.
+            var cardCount = document.querySelectorAll(CARD_SELECTOR).length;
             var invalidNow = (typeof findInvalidContainers === 'function')
                 ? findInvalidContainers().length : null;
             // markPatched sets data-fav-fix-marked (NOT data-fav-fix-patched).
