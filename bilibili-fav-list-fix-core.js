@@ -35,7 +35,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.14';
+    var CORE_VERSION = '0.8.15';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -946,6 +946,23 @@
     var pageCache = new Map();   // key=`${src}|${mediaId}|${pn}` → Promise<page>
     var pageItems = new Map();   // key=`${src}|${oid}` → raw item from that source
 
+    // Drop EVERY cache layer for a single av so the next patchOnce truly
+    // re-fetches it from the network:
+    //   - persistent GM item (clearItemCache)
+    //   - in-memory raw rows for ALL sources (pageItems)
+    //   - the paginated page-promise cache (pageCache) — otherwise ensurePage
+    //     hands back the resolved page whose list ALREADY dropped this av, so
+    //     the merge re-runs on stale rows and re-saves identical data.
+    // Shared by the card menu "清缓存并重抓" and the forceRefetch() debug API
+    // so both paths behave identically.
+    function dropItemCaches(av) {
+        clearItemCache(av);
+        Object.keys(SOURCES).forEach(function (src) {
+            pageItems.delete(src + '|' + av);
+        });
+        pageCache.clear();
+    }
+
     function ensurePage(src, mediaId, pn) {
         var key = src + '|' + mediaId + '|' + pn;
         if (pageCache.has(key)) return pageCache.get(key);
@@ -1762,16 +1779,10 @@
             key: 'clear-cache', label: '清缓存并重抓',
             successMsg: '缓存已清除，重新抓取中',
             onClick: function () {
-                // Cache nuke: GM, in-memory raw rows, paginated promises.
-                clearItemCache(av);
-                Object.keys(SOURCES).forEach(function (src) {
-                    pageItems.delete(src + '|' + av);
-                });
-                // pageCache holds Promise<page>; must be flushed so the next
-                // patchOnce actually re-fetches Android pages (otherwise the
-                // resolved promise's items list is reused — and that list is
-                // exactly the one that already dropped this av).
-                pageCache.clear();
+                // Cache nuke for this av (GM item + in-memory rows + page
+                // promises). Shared with forceRefetch() via dropItemCaches so
+                // both paths really re-fetch instead of re-merging stale rows.
+                dropItemCaches(av);
 
                 // The hit captured in this closure is from whenever
                 // injectCardMenu was last called — possibly stale by now if
@@ -2138,6 +2149,20 @@
     var _phase1AvsCache = new Map(); // mediaId → { avs:Set<avStr>, complete:bool }
     var _missingBannerShown = new Set();   // mediaId values we've already rendered for
     var _missingInFlight = new Map();      // mediaId → Promise (dedup concurrent scans)
+
+    // Flush EVERY in-memory cache at once: paginated page promises, raw rows,
+    // ids list, phase-1 avs, banner-shown set, and in-flight scan dedup.
+    // Used by the SPA folder-switch handler and the "清除所有缓存" menu.
+    // Persistent GM item cache is NOT touched here — callers that want it gone
+    // (the menu) call clearAllItemCache() separately.
+    function dropAllInMemory() {
+        pageCache.clear();
+        pageItems.clear();
+        _idsListCache.clear();
+        _phase1AvsCache.clear();
+        _missingBannerShown.clear();
+        _missingInFlight.clear();
+    }
 
     async function fetchAllAvList(mediaId) {
         if (_idsListCache.has(mediaId)) return _idsListCache.get(mediaId);
@@ -2614,22 +2639,13 @@
         var mo = new MutationObserver(function () {
             if (location.href !== lastUrl) {
                 lastUrl = location.href;
-                // New folder → flush in-memory page cache. Per-avid GM
-                // storage cache is intentionally NOT cleared (re-hits will
-                // use stored data — clear from menu if needed).
-                pageCache.clear(); pageItems.clear();
-                // Also drop missing-detection caches so the new folder
-                // gets its own scan (banner state is per-mediaId), and
-                // tear down any banner the previous folder painted.
-                _idsListCache.clear();
-                _phase1AvsCache.clear();
-                _missingBannerShown.clear();
-                // Drop in-flight scan dedup too: a scan that was walking the
-                // OLD folder must not be reused for the new mediaId. (The
-                // render-time detectMediaId() guard already stops a stale
-                // scan from painting; clearing here also lets the new folder
-                // start its own scan immediately rather than awaiting the old.)
-                _missingInFlight.clear();
+                // New folder → flush every in-memory cache (page promises,
+                // raw rows, ids list, phase-1 avs, banner-shown, in-flight
+                // scans). Per-avid GM storage cache is intentionally NOT
+                // cleared (re-hits reuse stored data; clear from menu if
+                // needed). The render-time detectMediaId() guard already stops
+                // a stale in-flight scan from painting the new folder.
+                dropAllInMemory();
                 var oldBanner = document.getElementById('__fav_fix_missing_banner');
                 if (oldBanner) oldBanner.remove();
                 // Boot-style detection trigger for the new folder. Delay
@@ -2696,10 +2712,17 @@
             _missingBannerShown.delete(mid);
             detectMissingAndRender(mid);
         });
-        GM_registerMenuCommand('fav-fix：清除所有条目缓存', function () {
+        GM_registerMenuCommand('fav-fix：清除所有缓存并刷新页面', function () {
             var n = clearAllItemCache();
-            if (n < 0) toast('GM_listValues 权限缺失，无法批量清除', 'err');
-            else toast('已清除 ' + n + ' 项条目缓存', 'ok');
+            if (n < 0) { toast('GM_listValues 权限缺失，无法批量清除', 'err'); return; }
+            // Persistent GM items gone; now flush every in-memory layer too,
+            // otherwise the page keeps serving cached rows until reload. The
+            // on-screen cards are already patched (they no longer match the
+            // invalid signature), so an in-place re-scan can't refresh them —
+            // a reload is the clean, correct way to surface fresh data.
+            dropAllInMemory();
+            toast('已清除 ' + n + ' 项缓存，正在刷新…', 'ok');
+            setTimeout(function () { location.reload(); }, 600);
         });
         GM_registerMenuCommand('fav-fix：查看登录状态', function () {
             var a = getAuth();
@@ -2823,7 +2846,10 @@
         forceRefetch: function (avOrBv) {
             var av = String(avOrBv);
             if (/^BV/i.test(av)) av = bvToAv(av);
-            clearItemCache(av);
+            // dropItemCaches, not bare clearItemCache: also flush the in-memory
+            // raw rows + page promises, otherwise patchOnce re-merges the same
+            // stale rows and re-saves them — no real refetch happens in-session.
+            dropItemCaches(av);
             return patchOnce();
         },
         // Missing-item recovery (task #15): inspection + manual trigger
