@@ -77,7 +77,7 @@ python serve.py
 | 调用 | 用途 |
 | ---- | ---- |
 | `__biliFavFix.VERSION` | 当前核心版本号 |
-| `__biliFavFix.getAuth()` | 查看当前登录模式与 `access_key` 状态 |
+| `__biliFavFix.getAuth()` | 查看当前登录模式与凭据状态（脱敏返回 `{ mode, hasAccessKey, ageDays }`，不含原始 `access_key`） |
 | `__biliFavFix.fetchPage(mediaId, pn)` | 手动调用 Android 接口 |
 | `__biliFavFix.patchNow()` | 清除内存缓存并立即重跑 |
 | `__biliFavFix.detectMissing()` | 重新扫描服务端静默丢弃的条目 |

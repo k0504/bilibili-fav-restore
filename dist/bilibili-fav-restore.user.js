@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.8.11
+// @version      0.8.12
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -37,7 +37,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.11)
+ * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.12)
  * Regenerate with: python build.py
  *
  * For dev workflow (edit core + reload tab without rebuilding) see
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.11';
+    var CORE_VERSION = '0.8.12';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -1410,6 +1410,17 @@
 
     // ─── Hover tooltip (rich) ───────────────────────────────────────────
 
+    // Third-party archives (xbeibeix HTML scrape, biliplus, jijidown) are an
+    // untrusted boundary: a poisoned/compromised source could return a
+    // cover/avatar URL of `javascript:…` or `data:text/html,…`. Setting such
+    // a value as img.src is inert (browsers never execute it), but handing it
+    // to GM_openInTab would navigate a real tab there. Whitelist absolute
+    // http(s) before any URL crosses into GM_openInTab or an <img src> we
+    // build from source data.
+    function isHttpUrl(url) {
+        return typeof url === 'string' && /^https?:\/\//i.test(url);
+    }
+
     function esc(s) {
         return String(s == null ? '' : s)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -1546,8 +1557,11 @@
 
         // UP 主
         if (real.upper && (real.upper.name || real.upper.face)) {
-            var avatar = real.upper.face
-                ? '<img src="' + esc(real.upper.face.replace(/^http:\/\//, 'https://')) + '" '
+            var faceUrl = real.upper.face ? real.upper.face.replace(/^http:\/\//, 'https://') : '';
+            // Only render the avatar img for absolute http(s) faces (esc still
+            // guards attribute breakout; isHttpUrl rejects javascript:/data:).
+            var avatar = isHttpUrl(faceUrl)
+                ? '<img src="' + esc(faceUrl) + '" '
                   + 'style="width:18px;height:18px;border-radius:50%;vertical-align:middle;margin-right:6px;background:#444" />'
                 : '';
             var uid = real.upper.mid ? ' <span style="color:#888;font-size:11px">UID ' + esc(real.upper.mid) + '</span>' : '';
@@ -1735,11 +1749,16 @@
             successMsg: '完整信息已复制至剪贴板',
             onClick: function () { GM_setClipboard(buildPlainInfo(real), 'text'); }
         });
-        if (real.cover && !COVER_PLACEHOLDER_RE.test(real.cover)) items.push({
+        // Cover URL may come from an untrusted 3rd-party source — only offer
+        // "open cover" for an absolute http(s) URL (isHttpUrl rejects
+        // javascript:/data: that GM_openInTab would otherwise navigate to).
+        var coverUrl = real.cover ? String(real.cover).replace(/^http:\/\//, 'https://') : '';
+        if (coverUrl && !COVER_PLACEHOLDER_RE.test(coverUrl) && isHttpUrl(coverUrl)) items.push({
             key: 'open-cover', label: '查看原始封面',
             onClick: function () {
-                GM_openInTab(real.cover.replace(/^http:\/\//, 'https://'),
-                             { active: true, insert: true, setParent: true });
+                // Re-check at click time (defensive; coverUrl is captured above).
+                if (!isHttpUrl(coverUrl)) { toast('封面链接异常，已拦截', 'warn'); return; }
+                GM_openInTab(coverUrl, { active: true, insert: true, setParent: true });
             }
         });
         if (av) items.push({
@@ -2738,7 +2757,22 @@
         version: CORE_VERSION,   // legacy alias
 
         // --- inspection ---
-        getAuth: getAuth,
+        // REDACTED on purpose. This object lives on unsafeWindow (page world)
+        // so DevTools can reach it — which means ANY script on the bilibili
+        // page (official code, ads, another extension, an injected payload)
+        // can read whatever we expose here. The raw access_key is a ~30-day
+        // account credential; returning it would let a hostile page script
+        // exfiltrate it, defeating the whole point of running in the isolated
+        // world. Debugging never needs the raw token — surface the same
+        // redacted view as the "查看登录状态" menu instead.
+        getAuth: function () {
+            var a = getAuth();
+            return {
+                mode: a.mode,
+                hasAccessKey: !!a.access_key,
+                ageDays: a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null
+            };
+        },
         loadCache: loadCache,
         cache: { pages: pageCache, items: pageItems },
         sources: SOURCES,
@@ -2826,7 +2860,7 @@
                 '__biliFavFix.stats()              quick health: auth / cache / DOM counts',
                 '__biliFavFix.listSources()        which sources are enabled, what kind',
                 '__biliFavFix.cache                live pages + items Maps',
-                '__biliFavFix.getAuth()            { mode, access_key }',
+                '__biliFavFix.getAuth()            { mode, hasAccessKey, ageDays } (key redacted)',
                 '__biliFavFix.patchNow()           drop caches and re-scan DOM',
                 '__biliFavFix.forceRefetch(bvOrAv) drop one item cache + re-patch',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage',
