@@ -35,7 +35,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.10';
+    var CORE_VERSION = '0.8.11';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -65,6 +65,23 @@
     // web API returns share this image (filename starts with `be27fd62`).
     var PLACEHOLDER_COVER_TOKEN = 'be27fd62';
     var INVALID_TITLE = '已失效视频';
+
+    // Max pages walked for ANY full-collection traversal (ps=20 → this×20
+    // items). Single source of truth for three call sites that previously
+    // used 20/20/30 inconsistently:
+    //   - phase-1 resolver + flap retry: the 20-page cap silently degraded
+    //     invalid-card recovery past item #400 (av only reachable on a
+    //     later page never resolved via paginated sources).
+    //   - fetchFullPhase1Avs (missing-item baseline): the fixed 30-page cap
+    //     made the >600-item case falsely report its tail as "silently
+    //     dropped" because the diff compared the FULL ids list against a
+    //     truncated walk. Now the walk also reports whether it reached a
+    //     natural has_more=false end (see fetchFullPhase1Avs `complete`),
+    //     and the banner only renders when it did.
+    // 50 pages = 1000 items covers the overwhelming majority of real
+    // collections; larger ones skip the (unreliable) missing banner rather
+    // than emit a false positive.
+    var MAX_PAGE_WALK = 50;
 
     // Settings (overridable via menu commands).
     var DEBUG = !!GM_getValue('debug', false);
@@ -985,7 +1002,7 @@
             // whether or not the response actually contains it. "Got no
             // record" = the av wasn't in the response.
             todoAvs.forEach(function (av) { markAttempted(av, src); });
-            var pn = 1, MAX_PN = 20;
+            var pn = 1, MAX_PN = MAX_PAGE_WALK;
             while (pn <= MAX_PN) {
                 var allFound = todoAvs.every(function (av) { return pageItems.has(src + '|' + av); });
                 if (allFound) break;
@@ -1056,7 +1073,7 @@
                     pageCache.delete(pcKeys[ki]);
                 }
             }
-            var pn = 1, MAX_PN = 20;
+            var pn = 1, MAX_PN = MAX_PAGE_WALK;
             while (pn <= MAX_PN) {
                 var allFound = flapCandidates.every(function (av) { return pageItems.has('android|' + av); });
                 if (allFound) { log('android flap retry: all candidates recovered at pn=' + pn); break; }
@@ -1377,6 +1394,18 @@
         return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     }
 
+    // Single source of truth for "投稿时间" so the hover tooltip and the
+    // "复制完整信息" clipboard text never diverge (AGENTS.md gotcha #83).
+    // Both must read the SAME field-fallback chain and the SAME source tag,
+    // otherwise an item that carries ctime but not pubtime shows a date on
+    // hover but a blank one when copied.
+    function pickPubTs(real) {
+        return real.ctime || real.pubtime || real.pubdate || null;
+    }
+    function pickPubSrc(real) {
+        return real._src_ctime || real._src_pubtime || real._src_pubdate || null;
+    }
+
     // Single global tooltip element, reused across all hovers.
     var _tipEl = null;
     function getTip() {
@@ -1501,14 +1530,14 @@
 
         // Dates — invalid-item snapshots may omit some date fields. Show
         // the row regardless so user knows what's missing vs unknown.
-        var pubT = fmtTime(real.ctime || real.pubtime || real.pubdate);
+        var pubT = fmtTime(pickPubTs(real));
         var favT = fmtTime(real.fav_time);
         var dateBits = [];
         dateBits.push('投稿 ' + (pubT || '<span style="color:#777">快照未记录</span>'));
         dateBits.push('收藏 ' + (favT || '<span style="color:#777">快照未记录</span>'));
         // Use the source that gave us at least one of the two dates
         // (typically public).
-        var dateSrc = real._src_pubtime || real._src_ctime || real._src_fav_time;
+        var dateSrc = pickPubSrc(real) || real._src_fav_time;
         parts.push(row('日期', dateBits.join('  ·  '), dateSrc));
 
         // Intro (truncated to 240).
@@ -1619,7 +1648,13 @@
             if (bits.length) lines.push('数据：' + bits.join('  ·  ') + tag('cnt_info'));
         }
         if (real.tid != null)    lines.push('分区 TID：' + real.tid + tag('tid'));
-        if (real.pubtime)        lines.push('投稿：' + new Date(real.pubtime * 1000).toLocaleString() + tag('pubtime'));
+        // Use the same fallback chain + source as the hover tooltip
+        // (pickPubTs / pickPubSrc) so copied text matches what was shown.
+        var _pubTs = pickPubTs(real);
+        if (_pubTs) {
+            var _pubSrc = pickPubSrc(real);
+            lines.push('投稿：' + new Date(_pubTs * 1000).toLocaleString() + (_pubSrc ? ' [' + _pubSrc + ']' : ''));
+        }
         if (real.fav_time)       lines.push('收藏：' + new Date(real.fav_time * 1000).toLocaleString() + tag('fav_time'));
         if (real.intro && real.intro.trim()) lines.push('简介：' + real.intro + tag('intro'));
         if (real.link)           lines.push('原 link：' + real.link);
@@ -2049,8 +2084,9 @@
     // Per-mediaId cache so we don't hammer the endpoint on every patchOnce.
 
     var _idsListCache = new Map();   // mediaId → Array<{id, bvid}>
-    var _phase1AvsCache = new Map(); // mediaId → Set<avStr> from a full phase-1 walk
+    var _phase1AvsCache = new Map(); // mediaId → { avs:Set<avStr>, complete:bool }
     var _missingBannerShown = new Set();   // mediaId values we've already rendered for
+    var _missingInFlight = new Map();      // mediaId → Promise (dedup concurrent scans)
 
     async function fetchAllAvList(mediaId) {
         if (_idsListCache.has(mediaId)) return _idsListCache.get(mediaId);
@@ -2075,6 +2111,13 @@
     //
     // Cached per mediaId so a tab that lingers doesn't re-walk on every
     // observer tick. ensurePage adds its own request-level dedup.
+    // Returns { avs:Set<avStr>, complete:bool }. `complete` is true ONLY when
+    // the walk reached a natural has_more=false end (i.e. it saw the whole
+    // collection). It is false when the walk stopped early — a page error or
+    // the MAX_PAGE_WALK cap. Callers MUST NOT compute a "missing" diff against
+    // an incomplete walk: the unwalked tail would be falsely flagged as
+    // silently-dropped (the >600-item false-positive this `complete` flag
+    // exists to prevent).
     async function fetchFullPhase1Avs(mediaId) {
         if (_phase1AvsCache.has(mediaId)) return _phase1AvsCache.get(mediaId);
         var collected = new Set();
@@ -2086,25 +2129,26 @@
         }
         if (!srcName) {
             log('fetchFullPhase1Avs: no enabled paginated source — abort');
-            return collected;
+            return { avs: collected, complete: false };
         }
-        var MAX_PN = 30;
-        for (var pn = 1; pn <= MAX_PN; pn++) {
+        var complete = false;
+        for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
             var page;
             try { page = await ensurePage(srcName, mediaId, pn); }
             catch (e) {
                 warn('fetchFullPhase1Avs:', srcName, 'page', pn, 'failed:', e.message);
-                break;
+                break;   // complete stays false — partial walk
             }
             (page.list || []).forEach(function (it) {
                 if (it.oid != null) collected.add(String(it.oid));
             });
-            if (!page.has_more) break;
+            if (!page.has_more) { complete = true; break; }
         }
-        _phase1AvsCache.set(mediaId, collected);
+        var result = { avs: collected, complete: complete };
+        _phase1AvsCache.set(mediaId, result);
         log('fetchFullPhase1Avs: ' + srcName + ' walked → '
-            + collected.size + ' items collected');
-        return collected;
+            + collected.size + ' items collected (complete=' + complete + ')');
+        return result;
     }
 
     function renderMissingBanner(mediaId, totalDeclared, missing) {
@@ -2219,47 +2263,84 @@
         if (document.body) document.body.appendChild(banner);
     }
 
-    async function detectMissingAndRender(mediaId) {
+    function detectMissingAndRender(mediaId) {
         // De-dupe up front. Observer ticks fire patchOnce repeatedly; we
         // only need one render per (mediaId, session). Manual re-scan via
         // menu deletes from this set first.
-        if (_missingBannerShown.has(mediaId)) return;
-        try {
-            // Parallel: ids endpoint + full phase-1 walk. ids is cheap
-            // (single GET, no auth); phase-1 walk is N pages so it
-            // dominates the wall time on first scan.
-            var all, phase1Avs;
+        if (_missingBannerShown.has(mediaId)) return Promise.resolve();
+        // In-flight dedup. The old code set _missingBannerShown only AFTER
+        // two awaits, so boot()'s 1500ms trigger and patchOnce's end-of-run
+        // trigger routinely raced through the guard and BOTH fetched + both
+        // rendered (TOCTOU). Share one Promise per mediaId instead: a second
+        // concurrent call returns the same in-flight scan. On failure the
+        // entry is dropped (finally) WITHOUT marking shown, so a later tick
+        // can retry.
+        if (_missingInFlight.has(mediaId)) return _missingInFlight.get(mediaId);
+        var p = (async function () {
             try {
-                var r = await Promise.all([
-                    fetchAllAvList(mediaId),
-                    fetchFullPhase1Avs(mediaId)
-                ]);
-                all = r[0];
-                phase1Avs = r[1];
+                // Parallel: ids endpoint + full phase-1 walk. ids is cheap
+                // (single GET, no auth); phase-1 walk is N pages so it
+                // dominates the wall time on first scan.
+                var all, phase1;
+                try {
+                    var r = await Promise.all([
+                        fetchAllAvList(mediaId),
+                        fetchFullPhase1Avs(mediaId)
+                    ]);
+                    all = r[0];
+                    phase1 = r[1];
+                } catch (e) {
+                    warn('detectMissing: parallel fetch failed:', e.message);
+                    return;
+                }
+                if (!all.length) return;
+                var phase1Avs = phase1.avs;
+                if (phase1Avs.size === 0) {
+                    // Either no enabled paginated source or every page failed.
+                    // Without a phase-1 baseline we can't compute a meaningful
+                    // gap (subtracting against empty = false-positive 100%
+                    // missing, which is exactly the 0.8.0 bug). Skip silently.
+                    log('detectMissing: phase-1 set empty, skip');
+                    return;
+                }
+                if (!phase1.complete) {
+                    // The walk did NOT reach a natural has_more=false end —
+                    // it was cut short by the MAX_PAGE_WALK cap or a page
+                    // error. The unwalked tail would be falsely reported as
+                    // "silently dropped" (the >600-item false positive). Skip
+                    // WITHOUT marking shown: the {avs,complete} result is
+                    // cached, so repeat ticks return instantly and re-skip;
+                    // a manual rescan (which clears the cache) can retry.
+                    log('detectMissing: phase-1 walk incomplete (declared=' + all.length
+                        + ' walked=' + phase1Avs.size + ', cap=' + MAX_PAGE_WALK
+                        + ' pages) — skipping gap detection to avoid false positives');
+                    return;
+                }
+                var missing = all.filter(function (x) {
+                    return !phase1Avs.has(String(x.id));
+                });
+                log('missing detect: declared=' + all.length
+                    + ' phase1=' + phase1Avs.size + ' missing=' + missing.length);
+                _missingBannerShown.add(mediaId);
+                if (missing.length === 0) return;
+                // Guard against a folder switch mid-scan: if the user
+                // navigated to a different favlist while we were walking,
+                // detectMediaId() no longer matches and the new folder will
+                // run its own scan. Rendering here would paint the previous
+                // folder's gap over the current page.
+                if (detectMediaId() !== mediaId) {
+                    log('detectMissing: folder changed mid-scan, skip render for', mediaId);
+                    return;
+                }
+                renderMissingBanner(mediaId, all.length, missing);
             } catch (e) {
-                warn('detectMissing: parallel fetch failed:', e.message);
-                return;
+                warn('detectMissing failed:', e.message);
+            } finally {
+                _missingInFlight.delete(mediaId);
             }
-            if (!all.length) return;
-            if (phase1Avs.size === 0) {
-                // Either no enabled paginated source or every page failed.
-                // Without a phase-1 baseline we can't compute a meaningful
-                // gap (subtracting against empty = false-positive 100%
-                // missing, which is exactly the 0.8.0 bug). Skip silently.
-                log('detectMissing: phase-1 set empty, skip');
-                return;
-            }
-            var missing = all.filter(function (x) {
-                return !phase1Avs.has(String(x.id));
-            });
-            log('missing detect: declared=' + all.length
-                + ' phase1=' + phase1Avs.size + ' missing=' + missing.length);
-            _missingBannerShown.add(mediaId);
-            if (missing.length === 0) return;
-            renderMissingBanner(mediaId, all.length, missing);
-        } catch (e) {
-            warn('detectMissing failed:', e.message);
-        }
+        })();
+        _missingInFlight.set(mediaId, p);
+        return p;
     }
 
     // Apply a resolved item to one card. Returns 'patched' | 'unrecoverable'.
@@ -2326,7 +2407,32 @@
         return 'patched';
     }
 
+    // Re-entrancy guard. patchOnceInner is async and a phase-1 walk can take
+    // seconds; schedule()'s 400ms debounce clears pendingTick the instant the
+    // timer fires, so a later observer tick (or the clear-cache menu, which
+    // calls patchOnce directly) could start a SECOND run while the first is
+    // still awaiting. Concurrent runs share pageCache/pageItems and the flap-
+    // retry path even deletes android page-cache keys mid-walk, so they can
+    // clobber each other. Serialize here: if a run is in flight, mark dirty
+    // and let the current run loop once more when it finishes (so the trigger
+    // that arrived mid-run — e.g. a clear-cache that just nuked the cache —
+    // is never dropped).
+    var _patchInFlight = false;
+    var _patchDirty = false;
     async function patchOnce() {
+        if (_patchInFlight) { _patchDirty = true; return; }
+        _patchInFlight = true;
+        try {
+            do {
+                _patchDirty = false;
+                await patchOnceInner();
+            } while (_patchDirty);
+        } finally {
+            _patchInFlight = false;
+        }
+    }
+
+    async function patchOnceInner() {
         if (!isFavPage()) return;
         var mediaId = detectMediaId();
         if (!mediaId) { log('cannot detect mediaId from URL'); return; }
@@ -2463,6 +2569,12 @@
                 _idsListCache.clear();
                 _phase1AvsCache.clear();
                 _missingBannerShown.clear();
+                // Drop in-flight scan dedup too: a scan that was walking the
+                // OLD folder must not be reused for the new mediaId. (The
+                // render-time detectMediaId() guard already stops a stale
+                // scan from painting; clearing here also lets the new folder
+                // start its own scan immediately rather than awaiting the old.)
+                _missingInFlight.clear();
                 var oldBanner = document.getElementById('__fav_fix_missing_banner');
                 if (oldBanner) oldBanner.remove();
                 // Boot-style detection trigger for the new folder. Delay
