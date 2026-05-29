@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.8.16
+// @version      0.8.17
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -37,7 +37,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.16)
+ * Source: bilibili-fav-list-fix-core.js (CORE_VERSION = 0.8.17)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -82,7 +82,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.16';
+    var CORE_VERSION = '0.8.17';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -1317,8 +1317,20 @@
             'img[src*="' + PLACEHOLDER_COVER_TOKEN + '"]:not([data-fav-fix-marked])'
         );
         var nodes = Array.from(imgs).map(function (img) {
-            // Walk up looking for a container that has a link to /video/avXXX or /video/BVXXX,
-            // bounded at <body>.
+            // Resolve the container to the WHOLE fav card, not the first
+            // ancestor that happens to hold a /video/ link. On the modern
+            // layout that ancestor is `div.bili-video-card__cover`, which
+            // contains the cover <img> but NOT the title — the title is a
+            // sibling leaf <a>. A cover-only container means patchTitle can
+            // never reach the title node, so a recovered item shows its real
+            // cover with a stale "（视频已删除）" / "已失效视频" title (verified
+            // on a real card). Scoping to the card keeps cover AND title in
+            // one patchable subtree.
+            var card = img.closest(CARD_SELECTOR);
+            if (card) {
+                return { container: card, img: img, link: card.querySelector('a[href*="/video/"]') };
+            }
+            // Fallback (img not inside a known card class): old walk-up.
             var n = img;
             while (n && n !== document.body) {
                 var a = n.querySelector && n.querySelector('a[href*="/video/"]');
@@ -1354,12 +1366,12 @@
                 }
             }
             if (!titleEl) continue;
-            var n = titleEl;
-            while (n && n !== document.body) {
-                var link = n.querySelector && n.querySelector('a[href*="/video/"]');
-                if (link) { titleHits.push({ container: n, img: n.querySelector('img'), link: link, titleEl: titleEl }); break; }
-                n = n.parentElement;
-            }
+            // Container = the whole card (same as Strategy 1), so the dedupe
+            // below collapses both strategies' hits for one card into one and
+            // patchTitle/patchCover share a single subtree that holds both the
+            // title leaf and the cover <img>.
+            var link2 = card.querySelector('a[href*="/video/"]');
+            if (link2) titleHits.push({ container: card, img: card.querySelector('img'), link: link2, titleEl: titleEl });
         }
 
         // Merge by container (dedupe).
@@ -1459,18 +1471,55 @@
         img.style.opacity = '1';
     }
 
+    // Rewrite an element's visible title text in place. The title is a leaf
+    // (text-only) on bilibili's card, so we set its first non-empty text node
+    // and blank any extras — keeping the element itself (and its listeners /
+    // data attrs) rather than reassigning textContent wholesale.
+    function setTitleText(el, text) {
+        var tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+        var n, set = false;
+        while ((n = tw.nextNode())) {
+            if (!n.nodeValue.trim()) continue;
+            if (!set) { n.nodeValue = text; set = true; }
+            else n.nodeValue = '';
+        }
+        if (!set) el.textContent = text;
+    }
+
     function patchTitle(container, realTitle) {
         if (!container || !realTitle) return;
+        // Robust path: once a prior patch tagged the title element, update it
+        // directly — independent of what it currently shows ("已失效视频",
+        // "（视频已删除）", or a previous real title). The old text-match-only
+        // approach was one-shot: after the first rewrite the text no longer
+        // equalled INVALID_TITLE, so a later refetch (android flap → recovered)
+        // updated the cover but never the title. Verified on a real card: the
+        // title is a leaf <a> outside the cover container, reachable here only
+        // via the INVALID_TITLE match, which can never fire twice.
+        var tagged = container.querySelectorAll('[data-fav-fix-title]');
+        if (tagged.length) {
+            tagged.forEach(function (el) {
+                // Leaf element → safe to rewrite text. Non-leaf (tagged only
+                // for its title attribute) → leave children, just fix the attr.
+                if (el.children.length === 0) setTitleText(el, realTitle);
+                if (el.hasAttribute('title')) el.setAttribute('title', realTitle);
+            });
+            return;
+        }
+        // First touch: rewrite the INVALID_TITLE leaf and tag it so subsequent
+        // patches skip the (fragile) text match.
         var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
         var node;
         while ((node = walker.nextNode())) {
             if (node.nodeValue.trim() === INVALID_TITLE) {
                 node.nodeValue = node.nodeValue.replace(INVALID_TITLE, realTitle);
+                if (node.parentElement) node.parentElement.setAttribute('data-fav-fix-title', '1');
             }
         }
-        // Also patch title attributes (tooltip).
+        // Also patch + tag title attributes (native tooltip).
         container.querySelectorAll('[title="' + INVALID_TITLE + '"]').forEach(function (el) {
             el.setAttribute('title', realTitle);
+            el.setAttribute('data-fav-fix-title', '1');
         });
     }
 
@@ -1860,6 +1909,18 @@
                 var liveContainer = null, liveImg = null;
                 document.querySelectorAll(sel).forEach(function (a) {
                     if (liveContainer) return;
+                    // Resolve to the WHOLE card (same scope findInvalidContainers
+                    // now uses) so the title reset, mark-clearing, and the
+                    // __favFixReal tooltip binding all act on the node markPatched
+                    // actually touched — the cover-only sub-div never held the
+                    // title leaf, which is why the reset used to miss it.
+                    var card = a.closest(CARD_SELECTOR);
+                    if (card) {
+                        liveContainer = card;
+                        liveImg = card.querySelector('img[src*="' + PLACEHOLDER_COVER_TOKEN + '"]')
+                                  || card.querySelector('img');
+                        return;
+                    }
                     var n = a;
                     while (n && n !== document.body) {
                         var img = n.querySelector && n.querySelector('img');
@@ -2904,6 +2965,12 @@
         clearItemCache: clearItemCache,
         resolveItems: resolveItems,
         ensurePage: ensurePage,
+        // DOM-layer internals, exposed for diagnostics/verification (same
+        // spirit as resolveItems/ensurePage above): inspect what the scanner
+        // detects and drive a single card's patch in isolation.
+        findInvalidContainers: findInvalidContainers,
+        applyPatch: applyPatch,
+        patchTitle: patchTitle,
         patchNow: function () { pageCache.clear(); pageItems.clear(); return patchOnce(); },
         // forceRefetch(avOrBv) — drop cache for one av and re-run patch
         forceRefetch: function (avOrBv) {
