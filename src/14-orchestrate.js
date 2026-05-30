@@ -22,6 +22,18 @@
             markPatched(hit, real);
             return 'unrecoverable';
         }
+        if (real._pending) {
+            // Still being chased by the background android flap loop
+            // (runFlapRecovery). Deliberately leave the card in its native
+            // "已失效视频" placeholder state — no cover swap, no title rewrite,
+            // no outline/tooltip/menu (there's no data yet) — so it stays
+            // re-detectable by findInvalidContainers and gets upgraded IN PLACE
+            // the moment a walk recovers it. Just clear the first-pass spinner;
+            // the user chose a static placeholder (no persistent spinner) while
+            // recovery runs in the background.
+            clearLoading(hit);
+            return 'pending';
+        }
         if (real.cover && hit.img) {
             // Defer clearLoading until the new cover actually paints.
             // Without this the overlay vanishes the moment we swap

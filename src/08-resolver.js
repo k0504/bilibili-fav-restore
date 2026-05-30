@@ -165,64 +165,79 @@
         }
 
         // ─── Merge ─────────────────────────────────────────────────────
+        // Terminal-vs-retriable classification (the crux of android flap
+        // handling): when android is UP, an item that came back with no usable
+        // cover/title THIS pass is NOT terminal. android's fav endpoint is
+        // eventually-consistent and, for some folders, badly so (observed: a
+        // war-footage folder returned 58/89 on one walk; `public` returns ZERO
+        // invalid snapshots for it, so android is the only source). An item
+        // android flapped out this pass therefore lands as either:
+        //   - _no_source  (no source had it — public doesn't carry invalids here)
+        //   - _degenerate (only placeholders)
+        // Either way android may return its real snapshot on a LATER walk, so we
+        // flag it `_pending` (short TTL, card kept in the native "已失效视频"
+        // state = re-detectable, no terminal "（视频已删除）") and let
+        // runFlapRecovery chase it across several union walks. Only when android
+        // is DOWN (no access_key → no retry possible) do we write the terminal
+        // _no_source stub ("（视频已删除）", long TTL).
+        var androidUp = SOURCES.android.enabled();
         todoAvs.forEach(function (av) {
             var perSource = {};
             for (var s2 = 0; s2 < srcOrder.length; s2++) {
                 var item = pageItems.get(srcOrder[s2] + '|' + av);
                 if (item) perSource[srcOrder[s2]] = item;
             }
+            var attempted = attemptedPerAv.get(av);
+            var rec;
             if (Object.keys(perSource).length === 0) {
-                // None of the 4 sources have this av. Still emit a stub
-                // merged record + persist it, so:
-                //   - patchOnce sees an entry and runs markPatched (lets
-                //     the user see "we tried" rather than "did nothing").
-                //   - markPatched can render the unrecoverable styling
-                //     based on `_no_source` flag.
-                //   - the GM cache short-circuits the next page reload
-                //     instead of re-walking 4 dead sources.
-                var attemptedStub = attemptedPerAv.get(av);
-                var stub = {
+                // No source returned this av this pass.
+                rec = {
                     oid: Number(av),
-                    _no_source: true,
                     // _attempted: union of every source that queried this av
                     // (phase 1 paginated + phase 2 per-av). Tooltip "已查询
-                    // 但无记录" reads this. Old cache entries used the
-                    // narrower _attempted_3rd field; tooltip falls back.
-                    _attempted: attemptedStub ? Array.from(attemptedStub) : [],
+                    // 但无记录" reads this; old entries used _attempted_3rd.
+                    _attempted: attempted ? Array.from(attempted) : [],
                     _tried_sources: srcOrder.slice()
                 };
-                log('av', av, 'NOT FOUND in any source — caching stub');
-                saveCache(av, stub);
-                result.set(av, stub);
-                return;
+                if (androidUp) {
+                    rec._pending = true;   // retriable via background android re-walk
+                    log('av', av, 'not found this pass — pending (android may flap it back)');
+                } else {
+                    rec._no_source = true; // terminal: no android to retry with
+                    log('av', av, 'NOT FOUND in any source — caching stub (android down)');
+                }
+            } else {
+                rec = mergeBySource(perSource);
+                if (attempted) rec._attempted = Array.from(attempted);
+                // Degenerate (placeholders only) but android could still recover
+                // it on a later walk → keep retriable instead of stuck.
+                if (rec._degenerate && androidUp) rec._pending = true;
+                log('av', av, 'merged from {' + Object.keys(perSource).join(',') + '}',
+                    attempted ? '(attempted: ' + Array.from(attempted).join(',') + ')' : '',
+                    '→', 'cover=' + (rec._src_cover || '·'),
+                    'title=' + (rec._src_title || '·'),
+                    'upper=' + (rec._src_upper || '·'),
+                    'cnt=' + (rec._src_cnt_info || '·'),
+                    'dates=' + (rec._src_pubtime || rec._src_fav_time || '·'),
+                    rec._pending ? '[pending]' : '');
             }
-            var merged = mergeBySource(perSource);
-            var attempted = attemptedPerAv.get(av);
-            if (attempted) merged._attempted = Array.from(attempted);
-            log('av', av, 'merged from {' + Object.keys(perSource).join(',') + '}',
-                attempted ? '(attempted: ' + Array.from(attempted).join(',') + ')' : '',
-                '→', 'cover=' + (merged._src_cover || '·'),
-                'title=' + (merged._src_title || '·'),
-                'upper=' + (merged._src_upper || '·'),
-                'cnt=' + (merged._src_cnt_info || '·'),
-                'dates=' + (merged._src_pubtime || merged._src_fav_time || '·'));
-            saveCache(av, merged);
-            result.set(av, merged);
+            saveCache(av, rec);
+            result.set(av, rec);
         });
 
         // ─── Background: recover stubborn android flappers ───────────────
         // (replaces the old synchronous phase 1.5; see runFlapRecovery below)
-        // Candidates = items STILL degenerate after phase 1 + phase 2, i.e.
-        // no source produced a usable cover or title. For these the android
-        // snapshot is the only realistic recovery and android's per-walk
-        // flapping means more independent walks materially raise the hit rate
-        // (items 3rd-party already saved are not degenerate, so they're never
-        // chased here). Fire-and-forget: the caller paints from `result`
-        // immediately; recovered cards are re-patched in place as walks land.
-        if (SOURCES.android.enabled()) {
+        // Candidates = every item still `_pending` after phase 1 + phase 2:
+        // android either flapped it out entirely (_no_source-would-have-been)
+        // or only placeholders came back. android's per-walk flapping means
+        // more independent UNION walks materially raise the hit rate. Fire-and-
+        // forget: the caller paints from `result` immediately; recovered cards
+        // are re-patched in place as each walk lands (they stay "已失效视频" so
+        // findInvalidContainers keeps finding them until upgraded).
+        if (androidUp) {
             var bgCandidates = todoAvs.filter(function (av) {
                 var m = result.get(av);
-                return m && m._degenerate;
+                return m && m._pending;
             });
             if (bgCandidates.length) {
                 runFlapRecovery(mediaId, bgCandidates)

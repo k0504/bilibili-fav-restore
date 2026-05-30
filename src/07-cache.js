@@ -26,7 +26,15 @@
             log('cache av', av, 'version', v._cache_version, '!=', CACHE_VERSION, '— invalidating');
             return null;
         }
-        var ttl = v._degenerate ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+        // Short TTL for any NOT-confidently-recovered entry:
+        //   _degenerate — some source returned only placeholders, or
+        //   _pending    — android may still flap the real snapshot back in
+        //                 (see runFlapRecovery in 08-resolver.js).
+        // Locking these for 30 days would turn a transient android walk-to-walk
+        // drop into a permanent "deleted" (observed: a war-footage folder where
+        // android returned 58/89 on one walk and the dropped items all fell to
+        // _no_source). Only a confidently-recovered merge gets the long TTL.
+        var ttl = (v._degenerate || v._pending) ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
