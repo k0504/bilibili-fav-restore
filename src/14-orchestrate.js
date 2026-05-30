@@ -19,21 +19,25 @@
             // No new cover src to wait for — clear loading overlay now.
             // (No-op for fast-path cards that never had loading marked.)
             clearLoading(hit);
+            clearPending(hit);
             markPatched(hit, real);
             return 'unrecoverable';
         }
         if (real._pending) {
             // Still being chased by the background android flap loop
-            // (runFlapRecovery). Deliberately leave the card in its native
-            // "已失效视频" placeholder state — no cover swap, no title rewrite,
-            // no outline/tooltip/menu (there's no data yet) — so it stays
-            // re-detectable by findInvalidContainers and gets upgraded IN PLACE
-            // the moment a walk recovers it. Just clear the first-pass spinner;
-            // the user chose a static placeholder (no persistent spinner) while
-            // recovery runs in the background.
+            // (runFlapRecovery). Leave the card's cover/title untouched (native
+            // "已失效视频" placeholder) so it stays re-detectable and gets
+            // upgraded IN PLACE the moment a walk recovers it — but DO show a
+            // retry indicator so the user can see work is happening: a spinning
+            // "重试中" badge while the loop is active, a static "待重试" once it
+            // has paused (will retry on the next resolve). Clear the first-pass
+            // loading overlay so the two don't stack.
             clearLoading(hit);
+            markPending(hit, _flapBgRunning);
             return 'pending';
         }
+        // Recovered (or android-down degenerate): drop any retry badge first.
+        clearPending(hit);
         if (real.cover && hit.img) {
             // Defer clearLoading until the new cover actually paints.
             // Without this the overlay vanishes the moment we swap

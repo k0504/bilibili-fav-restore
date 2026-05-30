@@ -109,6 +109,83 @@
         }
     }
 
+    // ─── Retry indicator (background android flap recovery) ──────────────
+    //   A small corner badge on the cover so the user can SEE that a deleted
+    //   item is being re-fetched in the background (runFlapRecovery), instead
+    //   of the card looking inert. Two states:
+    //     active=true  → spinning dot + "重试中" (the loop is walking now)
+    //     active=false → static gray + "待重试" (loop paused; retries next resolve)
+    //   Removed by clearPending() the moment the item recovers (real cover) or
+    //   is written terminal. Distinct from markLoading's full-cover overlay so
+    //   it reads as "still trying" rather than "page loading". No emoji.
+    var _retryStylesInjected = false;
+    function ensureRetryStyles() {
+        if (_retryStylesInjected) return;
+        _retryStylesInjected = true;
+        var st = document.createElement('style');
+        st.id = '__fav_fix_retry_styles';
+        st.textContent = [
+            '@keyframes __fav_fix_retry_spin { to { transform: rotate(360deg); } }',
+            '@keyframes __fav_fix_retry_pulse { 0%,100%{opacity:.95} 50%{opacity:.5} }',
+            '.fav-fix-retry-badge {',
+            '  position:absolute; left:6px; top:6px; z-index:2147483646;',
+            '  display:flex; align-items:center; gap:5px;',
+            '  padding:3px 7px; border-radius:10px;',
+            '  font:600 11px/1 -apple-system,Segoe UI,sans-serif;',
+            '  color:#fff; background:rgba(192,57,43,.82);',
+            '  pointer-events:none; user-select:none;',
+            '}',
+            '.fav-fix-retry-badge .fav-fix-retry-dot {',
+            '  width:9px; height:9px; border-radius:50%;',
+            '  border:2px solid rgba(255,255,255,.4); border-top-color:#fff;',
+            '  animation:__fav_fix_retry_spin .8s linear infinite;',
+            '}',
+            '.fav-fix-retry-badge.waiting {',
+            '  background:rgba(127,140,141,.8);',
+            '  animation:__fav_fix_retry_pulse 1.8s ease-in-out infinite;',
+            '}',
+            '.fav-fix-retry-badge.waiting .fav-fix-retry-dot { animation:none; border-top-color:rgba(255,255,255,.55); }'
+        ].join('\n');
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function markPending(hit, active) {
+        if (!hit || !hit.img) return;          // need a cover area to anchor to
+        var coverWrap = hit.img.parentElement;
+        if (!coverWrap) return;
+        ensureRetryStyles();
+        var pos = (coverWrap.ownerDocument.defaultView || window)
+                    .getComputedStyle(coverWrap).position;
+        if (pos === 'static') coverWrap.style.position = 'relative';
+        var badge = coverWrap.querySelector('[data-fav-fix-retry]');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.setAttribute('data-fav-fix-retry', '1');
+            badge.className = 'fav-fix-retry-badge';
+            var dot = document.createElement('span');
+            dot.className = 'fav-fix-retry-dot';
+            var txt = document.createElement('span');
+            txt.setAttribute('data-fav-fix-retry-txt', '1');
+            badge.appendChild(dot);
+            badge.appendChild(txt);
+            coverWrap.appendChild(badge);
+        }
+        badge.classList.toggle('waiting', !active);
+        var t = badge.querySelector('[data-fav-fix-retry-txt]');
+        if (t) t.textContent = active ? '重试中' : '待重试';
+    }
+
+    function clearPending(hit) {
+        if (!hit) return;
+        var scopes = [];
+        if (hit.img && hit.img.parentElement) scopes.push(hit.img.parentElement);
+        if (hit.container) scopes.push(hit.container);
+        for (var s = 0; s < scopes.length; s++) {
+            var b = scopes[s].querySelectorAll('[data-fav-fix-retry]');
+            for (var i = 0; i < b.length; i++) b[i].remove();
+        }
+    }
+
     // ─── Mark a patched item ────────────────────────────────────────────
     //   - solid red outline (4px) on the cover img — uses CSS outline so
     //     it doesn't reflow layout; outline-offset:-4px tucks it inside

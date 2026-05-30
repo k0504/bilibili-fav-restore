@@ -344,6 +344,11 @@
                 'still unrecovered (fall through to 3rd-party / permanent filter)');
         } finally {
             _flapBgRunning = false;
+            // Re-run the patch pass with the loop now inactive so any still-
+            // pending cards flip their badge from "重试中" to "待重试" (they
+            // will be retried on the next resolve). Recovered cards already
+            // upgraded via the per-walk schedule() calls above.
+            schedule();
         }
     }
 
