@@ -56,6 +56,20 @@
     var FLAP_MAX_DRY        = 7;                  // give up after this many consecutive 0-recovery walks
     var FLAP_TIME_BUDGET_MS = 30 * 60 * 1000;     // 30-min overall hard ceiling (active-recovery backstop)
 
+    // Missing-item banner baseline (fetchFullPhase1Avs in 13-missing.js). The
+    // "静默丢弃 N 项" count = (ids inventory) MINUS (what the paginated source
+    // actually returned). When that source is android, a SINGLE walk drops a
+    // large, VARIABLE fraction to flap (observed 42/89 = 47% on one walk), so a
+    // one-walk baseline falsely flags those as dropped and inflates N. UNION
+    // independent android walks until the union STOPS GROWING — an item only
+    // counts dropped if EVERY walk missed it. A fixed walk count is fragile
+    // (flap rate varies per folder/moment: too few → over-report, too many →
+    // wasted load), so converge like runFlapRecovery instead: keep walking
+    // until MISSING_DRY_ROUNDS consecutive walks add 0 new avs (union saturated),
+    // capped at MISSING_MAX_WALKS. public is stable → one walk.
+    var MISSING_DRY_ROUNDS = 2;   // union saturated after this many 0-new walks
+    var MISSING_MAX_WALKS  = 8;   // hard backstop on android union walks
+
     // One bilibili fav "card" across the modern + legacy layouts. Single
     // source of truth shared by findInvalidContainers Strategy 2 (scope the
     // title-text scan to cards instead of the whole document) and stats()

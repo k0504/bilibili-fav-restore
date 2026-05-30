@@ -47,24 +47,36 @@
     }
 
     // Walk EVERY phase-1 page of the first enabled paginated source until
-    // has_more=false. This is the "what did bilibili actually return for
-    // the whole collection" set. CANNOT use pageItems for this — patchOnce
-    // stops phase 1 the moment all current-page invalid hits are covered,
-    // so pageItems is a partial subset biased toward invalid items. Using
-    // it would massively over-count "missing" on collections where the
+    // has_more=false — and for android, UNION independent walks until the
+    // union stops growing, so the baseline isn't distorted by android's
+    // large/variable per-walk flap. This is the "what did bilibili actually
+    // return for the whole collection" set. CANNOT use pageItems for this —
+    // patchOnce stops phase 1 the moment all current-page invalid hits are
+    // covered, so pageItems is a partial subset biased toward invalid items.
+    // Using it would massively over-count "missing" on collections where the
     // current DOM page has few or no invalid cards. (Was the 0.8.0 bug:
     // a 99-item clean collection reported "static 99 项" because pageItems
     // was empty.)
     //
+    // Why union-to-convergence: a SINGLE android walk drops a large, variable
+    // fraction of invalid items (observed 42/89 = 47% on one walk), so each
+    // falsely lands in the diff as "silently dropped" and inflates the banner.
+    // Unioning walks until MISSING_DRY_ROUNDS in a row add nothing new means an
+    // item only counts dropped if EVERY walk missed it — the same multi-sample
+    // convergence runFlapRecovery (08-resolver.js) uses to recover flappers. A
+    // fixed walk count can't work: the flap rate varies, so it would under- or
+    // over-walk.
+    //
     // Cached per mediaId so a tab that lingers doesn't re-walk on every
     // observer tick. ensurePage adds its own request-level dedup.
     // Returns { avs:Set<avStr>, complete:bool }. `complete` is true ONLY when
-    // the walk reached a natural has_more=false end (i.e. it saw the whole
-    // collection). It is false when the walk stopped early — a page error or
+    // walk 1 reached a natural has_more=false end (i.e. it saw the whole
+    // collection). It is false when walk 1 stopped early — a page error or
     // the MAX_PAGE_WALK cap. Callers MUST NOT compute a "missing" diff against
     // an incomplete walk: the unwalked tail would be falsely flagged as
     // silently-dropped (the >600-item false-positive this `complete` flag
-    // exists to prevent).
+    // exists to prevent). The extra union walks never lower `complete`; they
+    // only add flap-recovered avs to the set.
     async function fetchFullPhase1Avs(mediaId) {
         if (_phase1AvsCache.has(mediaId)) return _phase1AvsCache.get(mediaId);
         var collected = new Set();
@@ -78,23 +90,65 @@
             log('fetchFullPhase1Avs: no enabled paginated source — abort');
             return { avs: collected, complete: false };
         }
+
+        // android (eventually-consistent) → union INDEPENDENT walks until the
+        // union STOPS GROWING; public (stable) → one walk. The `dry` counter is
+        // the convergence signal: a walk that adds a new av resets it, a walk
+        // that adds nothing bumps it, and MISSING_DRY_ROUNDS consecutive 0-new
+        // walks means the union has saturated (we've seen everything android
+        // will return for this folder). Capped at MISSING_MAX_WALKS.
+        var isFlappy = (srcName === 'android');
         var complete = false;
-        for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
-            var page;
-            try { page = await ensurePage(srcName, mediaId, pn); }
-            catch (e) {
-                warn('fetchFullPhase1Avs:', srcName, 'page', pn, 'failed:', e.message);
-                break;   // complete stays false — partial walk
+        var walk = 0, dry = 0;
+        while (walk < (isFlappy ? MISSING_MAX_WALKS : 1) && dry < MISSING_DRY_ROUNDS) {
+            walk++;
+            if (walk > 1) {
+                // Gap so each walk is an INDEPENDENT server sample — back-to-back
+                // requests can replay the same eventually-consistent snapshot;
+                // the flap is observable on a ~seconds cadence. Reuse one short
+                // FLAP_BACKOFF_MS step (NOT the indexed widening one — this is a
+                // one-shot baseline, not the live retry's load-shaping).
+                await new Promise(function (r) { setTimeout(r, FLAP_BACKOFF_MS[1]); });
+                if (detectMediaId() !== mediaId) break;   // folder switched mid-union
             }
-            (page.list || []).forEach(function (it) {
-                if (it.oid != null) collected.add(String(it.oid));
-            });
-            if (!page.has_more) { complete = true; break; }
+            var before = collected.size;
+            var walkComplete = false;
+            for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
+                if (detectMediaId() !== mediaId) break;
+                var page;
+                try {
+                    // Walk 1 via ensurePage (reuses pages the live resolve
+                    // already cached + its pageItems writes). Extra walks call
+                    // fetchPage DIRECTLY so they bypass pageCache for a genuinely
+                    // fresh android sample (ensurePage would just replay walk 1's
+                    // cached pages — same reason runFlapRecovery bypasses it).
+                    page = (walk === 1) ? await ensurePage(srcName, mediaId, pn)
+                                        : await SOURCES[srcName].fetchPage({ mediaId: mediaId, pn: pn });
+                } catch (e) {
+                    warn('fetchFullPhase1Avs:', srcName, 'walk', walk, 'page', pn, 'failed:', e.message);
+                    break;   // partial walk
+                }
+                (page.list || []).forEach(function (it) {
+                    if (it.oid != null) collected.add(String(it.oid));
+                });
+                if (!page.has_more) { walkComplete = true; break; }
+            }
+            if (walk === 1) {
+                // `complete` is decided by walk 1 alone — whether we saw the
+                // WHOLE collection (reached has_more=false). If walk 1 was cut
+                // short (cap / page error), we can't diff, so stop (no union).
+                complete = walkComplete;
+                if (!complete) break;
+            } else {
+                // Walk 1 always adds (from empty) so it never trips dry; only
+                // count convergence from walk 2 on.
+                if (collected.size === before) dry++; else dry = 0;
+            }
         }
         var result = { avs: collected, complete: complete };
         _phase1AvsCache.set(mediaId, result);
-        log('fetchFullPhase1Avs: ' + srcName + ' walked → '
-            + collected.size + ' items collected (complete=' + complete + ')');
+        log('fetchFullPhase1Avs: ' + srcName + ' converged in ' + walk + ' walk(s) → '
+            + collected.size + ' avs unioned (complete=' + complete + ', dry=' + dry + ')');
         return result;
     }
 
