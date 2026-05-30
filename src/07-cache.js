@@ -13,10 +13,15 @@
     var CACHE_PREFIX  = 'item:av';
     var CACHE_VERSION = 5;   // bumped: +_degenerate flag (short TTL on no-cover-no-title merges)
     var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
-    // Short TTL for degenerate merges (no cover + no title from any source).
-    // Android API has walk-to-walk variability — same av sometimes appears
-    // on a page, sometimes doesn't. A 30-day lock-in turns one bad walk
-    // into a permanent failure; 10 min lets the next patchOnce retry.
+    // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
+    // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
+    // by the background runFlapRecovery loop (08-resolver.js), which re-walks
+    // android on its own backoff and re-patches in place. The short TTL only
+    // governs what a FUTURE fresh resolve (a reload / folder-switch minutes or
+    // hours later) does — after it expires, that fresh resolve re-fetches and
+    // re-kicks the loop instead of reusing a stale "still deleted" snapshot.
+    // A 30-day lock-in would instead turn one bad android walk into a permanent
+    // failure, so these stay short.
     var CACHE_TTL_DEGENERATE_MS = 1000 * 60 * 10;   // 10 min
 
     function loadCache(av) {

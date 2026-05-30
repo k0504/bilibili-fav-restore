@@ -29,9 +29,10 @@
             // "已失效视频" placeholder) so it stays re-detectable and gets
             // upgraded IN PLACE the moment a walk recovers it — but DO show a
             // retry indicator so the user can see work is happening: a spinning
-            // "重试中" badge while the loop is active, a static "待重试" once it
-            // has paused (will retry on the next resolve). Clear the first-pass
-            // loading overlay so the two don't stack.
+            // "重试中" badge while the loop is alive (it owns the retry and will
+            // keep sampling on its backoff), a static "待重试" once the loop has
+            // given up (only a fresh reload, after the short cache TTL, re-kicks
+            // it). Clear the first-pass loading overlay so the two don't stack.
             clearLoading(hit);
             markPending(hit, _flapBgRunning);
             return 'pending';

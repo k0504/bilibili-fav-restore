@@ -34,16 +34,27 @@
     // 888 / 879 / 887 of a claimed 923). Crucially the drop is NOT uniform:
     // deactivated-account / short-legacy-aid items are 7.6x over-represented,
     // so the stubborn subset misses far more than 5% per walk. A single extra
-    // walk (the old synchronous "phase 1.5") only recovered the easy half and
-    // froze every loading spinner for its ~5-8s. The statistically-correct
-    // fix is to UNION several independent walks — each walk is a fresh server
-    // sample, so P(still missing after N) ≈ (per-walk miss)^N — and to run it
-    // in the BACKGROUND so first paint is never blocked (runFlapRecovery in
-    // 08-resolver.js). These three bound that loop so it can't walk forever
-    // against items under genuinely-permanent server-side filtering:
-    var MAX_FLAP_WALKS      = 4;            // hard cap on background android re-walks
-    var FLAP_DRY_ROUNDS     = 2;            // stop after N consecutive walks recover 0 new
-    var FLAP_TIME_BUDGET_MS = 60 * 1000;    // overall wall-clock ceiling for the loop
+    // walk only recovers the easy half. The statistically-correct fix is to
+    // UNION several INDEPENDENT walks — each walk is a fresh server sample, so
+    // P(still missing after N) ≈ (per-walk miss)^N.
+    //
+    // ONE background loop (runFlapRecovery in 08-resolver.js) owns the ENTIRE
+    // retry lifecycle for a folder — it is the SOLE retry path. No cache-TTL
+    // timer, no scroll-to-retry: the loop re-walks android on an ADAPTIVE
+    // backoff and live-patches each recovered card until everything recovers
+    // or it gives up. The cadence AND the give-up are driven by one counter:
+    //   - recovered ≥1 this walk → dry resets to 0 → sample again fast
+    //   - recovered  0 this walk → dry++           → wait longer next walk
+    // So while items keep flapping back it samples quickly; once recoveries
+    // dry up it eases off and finally stops (dry === FLAP_MAX_DRY). This makes
+    // a still-flapping folder converge fast while a genuinely-deleted set is
+    // abandoned after ~7 cheap samples instead of being hammered.
+    var FLAP_BACKOFF_MS = [1000, 2000, 5000, 15000, 30000, 60000, 120000];
+    //   Delay BEFORE the next walk, indexed by the current dry count (clamped
+    //   to the last entry). Front-loaded burst (1-5s) catches seconds-level
+    //   flapping; the tail widens to a gentle 2-min cadence for stubborn items.
+    var FLAP_MAX_DRY        = 7;                  // give up after this many consecutive 0-recovery walks
+    var FLAP_TIME_BUDGET_MS = 30 * 60 * 1000;     // 30-min overall hard ceiling (active-recovery backstop)
 
     // One bilibili fav "card" across the modern + legacy layouts. Single
     // source of truth shared by findInvalidContainers Strategy 2 (scope the

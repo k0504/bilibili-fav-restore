@@ -113,8 +113,10 @@
     //   A small corner badge on the cover so the user can SEE that a deleted
     //   item is being re-fetched in the background (runFlapRecovery), instead
     //   of the card looking inert. Two states:
-    //     active=true  → spinning dot + "重试中" (the loop is walking now)
-    //     active=false → static gray + "待重试" (loop paused; retries next resolve)
+    //     active=true  → spinning dot + "重试中" (loop alive — owns the retry,
+    //                    keeps sampling android on its backoff)
+    //     active=false → static gray + "待重试" (loop gave up; only a fresh
+    //                    reload, after the short cache TTL, re-kicks it)
     //   Removed by clearPending() the moment the item recovers (real cover) or
     //   is written terminal. Distinct from markLoading's full-cover overlay so
     //   it reads as "still trying" rather than "page loading". No emoji.

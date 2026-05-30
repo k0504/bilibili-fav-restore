@@ -106,15 +106,16 @@
         // ─── Phase 1.5 (REMOVED — now background) ──────────────────────
         // The android fav endpoint is eventually-consistent (~5% of invalid
         // items flap in/out per walk; deactivated-account items 7.6x over-
-        // represented — see MAX_FLAP_WALKS in 01-constants.js for the data).
+        // represented — see the FLAP_* block in 01-constants.js for the data).
         // This used to do ONE synchronous extra android walk here, which (a)
         // only recovered the easy half of the flappers and (b) froze every
-        // loading spinner for its ~5-8s. It is now a BACKGROUND loop-until-dry
-        // (runFlapRecovery, kicked off at the end of this function) that does
-        // several independent walks and re-patches recovered cards in place —
-        // so first paint is never blocked and the stubborn subset gets the
-        // multiple samples it statistically needs. Phase 2 (3rd-party) still
-        // runs synchronously below so first paint has a best-available cover.
+        // loading spinner for its ~5-8s. It is now a single self-driving
+        // BACKGROUND loop (runFlapRecovery, kicked off at the end of this
+        // function) that re-walks android on an adaptive backoff and re-patches
+        // recovered cards in place — so first paint is never blocked and the
+        // stubborn subset gets the multiple samples it statistically needs.
+        // Phase 2 (3rd-party) still runs synchronously below so first paint has
+        // a best-available cover.
 
         // ─── Phase 2: per-av sources (biliplus, xbeibeix, jijidown) ───
         // Only query 3rd-party archives for avs whose cover OR title is
@@ -248,26 +249,39 @@
         return result;
     }
 
-    // ─── Background android flap recovery (loop-until-dry) ───────────────
-    // Re-walks the android fav endpoint several times for the still-degenerate
-    // candidates, UNIONing each fresh server sample into pageItems. Each walk
-    // is a new chance to catch an item the previous walk's eventually-consistent
-    // filtering dropped (see MAX_FLAP_WALKS in 01-constants.js). Bounded by
-    // MAX_FLAP_WALKS / FLAP_DRY_ROUNDS / FLAP_TIME_BUDGET_MS so it converges
-    // and never hammers truly-permanent filtering.
+    // ─── Background android flap recovery (single self-driving loop) ─────
+    // THE retry mechanism. One loop owns a folder's whole retry lifecycle:
+    // re-walks the android fav endpoint, UNIONing each fresh server sample into
+    // pageItems, until every candidate recovers or it gives up. Each walk is a
+    // new chance to catch an item the previous walk's eventually-consistent
+    // filtering dropped. There is no other retry path — no cache-TTL timer, no
+    // scroll-to-retry; the short _pending TTL in 07-cache.js is now purely a
+    // staleness guard for a future fresh page load, NOT a retry trigger.
+    //
+    // Adaptive backoff (FLAP_BACKOFF_MS / FLAP_MAX_DRY in 01-constants.js): the
+    // `dry` counter drives BOTH cadence and termination. A walk that recovers
+    // something resets dry → next walk fires after the short burst gap; a walk
+    // that recovers nothing bumps dry → the gap widens and, at FLAP_MAX_DRY,
+    // the loop concludes the leftovers are genuinely filtered and stops. So a
+    // still-flapping folder is sampled fast and converges; a truly-deleted set
+    // is abandoned after ~7 cheap samples (~4 min) instead of being hammered.
     //
     // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
-    // merge and call schedule(). The still-degenerate cards remain detectable
-    // by findInvalidContainers Strategy 2 (their title is still "已失效视频"),
-    // and loadCache now returns the good merge, so patchOnce's fast path swaps
+    // merge and call schedule(). The still-pending cards remain detectable by
+    // findInvalidContainers Strategy 2 (their title is still "已失效视频"), and
+    // loadCache now returns the good merge, so patchOnce's fast path swaps
     // cover+title in place — no stored DOM hits to go stale across bilibili's
-    // virtualized scroll, no spinner re-flash (recovered avs hit the cache
-    // fast path, not the resolver).
+    // virtualized scroll, no spinner re-flash (recovered avs hit the cache fast
+    // path, not the resolver). Cards still pending while the loop is alive show
+    // a "重试中" badge (markPending reads _flapBgRunning); they flip to "待重试"
+    // only once the loop terminates (the finally's schedule()).
     //
     // Concurrency / race notes:
-    //   - Single loop at a time (_flapBgRunning). Re-entry is a no-op: still-
-    //     degenerate cards are short-TTL cached and fast-pathed, so a later
-    //     patchOnce won't re-enter the resolver for them while this runs.
+    //   - Single loop at a time (_flapBgRunning, true for the loop's WHOLE life
+    //     including backoff sleeps). Re-entry is a no-op. Backoff sleeps are
+    //     sliced ~1s so a folder switch frees _flapBgRunning within a second —
+    //     the next folder's resolve (fired after the SPA settle delay) can then
+    //     start its own loop instead of being locked out for minutes.
     //   - Walks call SOURCES.android.fetchPage DIRECTLY (not ensurePage) and
     //     write only pageItems — never pageCache. This deliberately bypasses
     //     the page-promise cache (we WANT a fresh sample each round) AND avoids
@@ -276,7 +290,8 @@
     //     thread (no await mid-write).
     //   - Bails the instant the folder changes (detectMediaId() !== mediaId);
     //     dropAllInMemory() on SPA folder-switch clears pageItems out from
-    //     under us, which is fine — we re-check before each page and each walk.
+    //     under us, which is fine — we re-check before each page, walk, and
+    //     backoff slice.
     var _flapBgRunning = false;
     async function runFlapRecovery(mediaId, candidates) {
         if (_flapBgRunning) return;
@@ -289,9 +304,9 @@
         try {
             log('flap-bg: start', pending.size, 'candidate(s):',
                 Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
-            while (pending.size && walk < MAX_FLAP_WALKS && dry < FLAP_DRY_ROUNDS) {
+            while (pending.size && dry < FLAP_MAX_DRY) {
                 if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
-                if (Date.now() > deadline)       { log('flap-bg: time budget exhausted'); break; }
+                if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); break; }
                 walk++;
 
                 // One fresh android walk straight into pageItems.
@@ -330,24 +345,35 @@
                 });
 
                 if (recovered.length) {
-                    dry = 0;
+                    dry = 0;   // progress → reset cadence to the burst gap and keep sampling fast
                     log('flap-bg walk ' + walk + ': recovered', recovered.length,
                         '→ re-patch;', pending.size, 'left');
                     // Upgrade on-screen cards via the normal fast path.
                     schedule();
                 } else {
-                    dry++;
-                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_DRY_ROUNDS + ')');
+                    dry++;     // no progress → widen the gap, step toward giving up
+                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
+                }
+
+                if (!pending.size || dry >= FLAP_MAX_DRY) break;
+
+                // Adaptive backoff before the next walk: gap widens with `dry`.
+                // Sleep in ~1s slices so a folder switch / budget expiry breaks
+                // out within a second (frees _flapBgRunning for the next folder).
+                var gap = FLAP_BACKOFF_MS[Math.min(dry, FLAP_BACKOFF_MS.length - 1)];
+                var until = Date.now() + gap;
+                while (Date.now() < until) {
+                    if (detectMediaId() !== mediaId || Date.now() > deadline) break;
+                    await new Promise(function (r) { setTimeout(r, Math.min(1000, until - Date.now())); });
                 }
             }
             log('flap-bg: done after', walk, 'walk(s);', pending.size,
-                'still unrecovered (fall through to 3rd-party / permanent filter)');
+                'still unrecovered (stays 待重试 until a fresh reload re-attempts)');
         } finally {
             _flapBgRunning = false;
             // Re-run the patch pass with the loop now inactive so any still-
-            // pending cards flip their badge from "重试中" to "待重试" (they
-            // will be retried on the next resolve). Recovered cards already
-            // upgraded via the per-walk schedule() calls above.
+            // pending cards flip their badge from "重试中" to "待重试".
+            // Recovered cards already upgraded via the per-walk schedule() calls.
             schedule();
         }
     }
