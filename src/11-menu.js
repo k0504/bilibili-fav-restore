@@ -60,8 +60,23 @@
 
     function buildMenuItems(hit, real) {
         var av = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : null);
+        // Re-read the freshest cache entry. The `real` captured when injectCardMenu
+        // bound this card's dropdown can be STALE: a pending card may have since
+        // recovered (or vice-versa), and the new-UI popper handler keeps the
+        // original closure. av/bv identity is stable, but _pending / title /
+        // sources may have changed — build from the live entry so a recovered
+        // card never shows "立即重试" and a pending card never copies an empty
+        // snapshot. (buildMenuItems runs fresh on each menu open, so this stays
+        // current.)
+        if (av) { var _lc = loadCache(av); if (_lc) real = _lc; }
         var bv = real.bvid || (av ? avToBv(av) : null);
         var items = [];
+        // Primary action for a still-pending card: re-arm THE flap loop now
+        // instead of waiting for the next page reload. Only shown while _pending.
+        if (av && real._pending) items.push({
+            key: 'retry', label: '立即重试',
+            onClick: function () { kickManualRetry(av); }
+        });
         if (av) items.push({
             key: 'cp-av', label: '复制 AV 号',
             successMsg: '已复制 av' + av + ' 至剪贴板',

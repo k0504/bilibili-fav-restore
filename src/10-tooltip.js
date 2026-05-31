@@ -130,6 +130,31 @@
                  + 'fav-fix · 视频可能已被永久删除' + '</div>';
         }
 
+        // Pending — still being chased by the background android flap loop, or
+        // waiting for a future retry after it gave up. There's no good snapshot
+        // yet, so render a state-aware explainer (NOT the normal rich layout
+        // with empty fields). _flapBgRunning is read LIVE here — showTip rebuilds
+        // innerHTML on every hover — so the text tracks whether the loop is
+        // currently alive (重试中) or has stopped (待重试), matching the badge.
+        if (real._pending) {
+            var pav = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : '');
+            var pbv = real.bvid || (pav ? avToBv(pav) : null);
+            var pActive = _flapBgRunning;
+            var pHead = pActive ? '正在找回此视频快照…' : '暂未找回，等待重试';
+            var pBody = pActive
+                ? 'bilibili 的 android 收藏接口会随机漏掉一部分失效视频，脚本正在后台多次重新采样把它捞回来。找回后本卡片会自动更新封面与标题，无需手动操作。'
+                : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。';
+            return '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:#fff;'
+                 + 'line-height:1.35;border-bottom:1px solid rgba(255,255,255,.12);padding-bottom:6px">'
+                 + esc(pHead) + '</div>'
+                 + (pav ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">AV ' + codeTag('av' + pav) + '</div>' : '')
+                 + (pbv ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">BV ' + codeTag(pbv) + '</div>' : '')
+                 + '<div style="margin-top:6px;color:#bdbdc2;font-size:11px;line-height:1.55">'
+                 + esc(pBody) + '</div>'
+                 + '<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#666;font-size:10px">'
+                 + 'fav-fix · ' + (pActive ? '重试中（后台自动）' : '待重试') + '</div>';
+        }
+
         var parts = [];
 
         // Title — full width, bold, with source chip after the title text.

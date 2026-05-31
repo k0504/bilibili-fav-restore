@@ -293,11 +293,21 @@
     //     under us, which is fine — we re-check before each page, walk, and
     //     backoff slice.
     var _flapBgRunning = false;
+    // Avs the loop GAVE UP on (still pending after it stopped), kept so a card's
+    // "立即重试" menu item (kickManualRetry) can re-arm the loop with the WHOLE
+    // leftover set in one walk instead of chasing a single av. Scoped to one
+    // folder via _flapLeftoverMid; cleared on folder switch (dropAllInMemory).
+    var _flapLeftover = new Set();
+    var _flapLeftoverMid = null;
     async function runFlapRecovery(mediaId, candidates) {
         if (_flapBgRunning) return;
         if (!candidates || !candidates.length) return;
         if (!SOURCES.android.enabled()) return;
         _flapBgRunning = true;
+        // Flip any on-screen pending badges to "重试中" right away: the loop may
+        // sleep on its first backoff before any recovery-driven schedule(), and
+        // a MANUAL re-arm has nothing else to repaint the cards.
+        schedule();
         var pending = new Set(candidates.map(String));
         var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
         var walk = 0, dry = 0;
@@ -371,10 +381,34 @@
                 'still unrecovered (stays 待重试 until a fresh reload re-attempts)');
         } finally {
             _flapBgRunning = false;
+            // Remember the avs we gave up on so a card's "立即重试" can re-arm
+            // the loop over the WHOLE leftover set (not just the clicked card).
+            // If the loop recovered everything, pending is empty → no leftover →
+            // the retry menu item won't render (cards are no longer _pending).
+            _flapLeftover = new Set(pending);
+            _flapLeftoverMid = mediaId;
             // Re-run the patch pass with the loop now inactive so any still-
             // pending cards flip their badge from "重试中" to "待重试".
             // Recovered cards already upgraded via the per-walk schedule() calls.
             schedule();
         }
+    }
+
+    // Manual re-arm of the flap loop from a card's "立即重试" menu item. Re-runs
+    // THE loop (runFlapRecovery) over every av it gave up on in THIS folder, so a
+    // single android walk recovers all still-pending cards, not just the clicked
+    // one. Falls back to [clickedAv] if the leftover set is stale/empty (e.g. a
+    // fresh page load started a new loop). No-op with a toast if a loop is alive
+    // (the card already shows 重试中) or android is unavailable.
+    function kickManualRetry(clickedAv) {
+        var mid = detectMediaId();
+        if (!mid) { toast('无法识别当前收藏夹', 'warn'); return; }
+        if (!SOURCES.android.enabled()) { toast('android 接口不可用，无法重试', 'warn'); return; }
+        if (_flapBgRunning) { toast('后台正在重试中，请稍候', 'ok'); return; }
+        var cands = (_flapLeftoverMid === mid) ? Array.from(_flapLeftover) : [];
+        if (!cands.length && clickedAv) cands = [String(clickedAv)];
+        if (!cands.length) { toast('没有待重试的视频', 'ok'); return; }
+        toast('正在重新抓取 ' + cands.length + ' 项待重试视频', 'ok');
+        runFlapRecovery(mid, cands).catch(function (e) { warn('manual retry threw:', e); });
     }
 

@@ -115,8 +115,12 @@
     //   of the card looking inert. Two states:
     //     active=true  → spinning dot + "重试中" (loop alive — owns the retry,
     //                    keeps sampling android on its backoff)
-    //     active=false → static gray + "待重试" (loop gave up; only a fresh
-    //                    reload, after the short cache TTL, re-kicks it)
+    //     active=false → static gray + "待重试" (loop gave up; a fresh reload
+    //                    re-kicks it, OR the card's "立即重试" menu item does so
+    //                    on demand via kickManualRetry)
+    //   The badge is just the at-a-glance cue; the FULL explanation of what
+    //   重试中/待重试 mean lives in the card's hover tooltip (buildTipHtml's
+    //   _pending branch), bound for pending cards via bindCardAffordances.
     //   Removed by clearPending() the moment the item recovers (real cover) or
     //   is written terminal. Distinct from markLoading's full-cover overlay so
     //   it reads as "still trying" rather than "page loading". No emoji.
@@ -195,6 +199,32 @@
     //   - rich hover tooltip showing title / UP / stats / dates / intro
     //   - data-fav-fix-marked guard avoids double-binding on observer re-runs
 
+    // Bind the hover tooltip + inject our card-menu items onto a card, WITHOUT
+    // touching its cover / outline / title. markPatched calls this for recovered
+    // and terminal cards; applyPatch's pending branch calls it directly so a
+    // card still being chased by the flap loop ALSO gets the rich tooltip (now a
+    // 重试中/待重试 state explainer) and the "立即重试" menu item — previously
+    // pending cards skipped markPatched entirely and were left with only a bare
+    // badge. __favFixReal is read live by the tooltip handler, so a later
+    // markPatched (on recovery) upgrades the tooltip in place without re-binding.
+    function bindCardAffordances(hit, real) {
+        var bindEl = hit.container || hit.img;
+        if (!bindEl) return;
+        bindEl.__favFixReal = real;
+        if (!bindEl.getAttribute('data-fav-fix-tipbound')) {
+            bindEl.setAttribute('data-fav-fix-tipbound', '1');
+            bindEl.addEventListener('mouseenter', function (e) {
+                if (bindEl.__favFixReal) showTip(bindEl, bindEl.__favFixReal, e);
+            });
+            bindEl.addEventListener('mouseleave', hideTip);
+        }
+        // Inject per-card menu items (复制 AV/BV、复制完整信息、查看封面、
+        // 在 biliplus 打开、清缓存、以及 pending 卡的「立即重试」). Safe to call
+        // repeatedly; dedup via data-fav-fix-key on the menu items themselves.
+        try { injectCardMenu(hit, real); }
+        catch (e) { warn('injectCardMenu threw:', e); }
+    }
+
     function markPatched(hit, real) {
         // NOTE: clearLoading() is NOT called here. The caller (patchOnce
         // application loop) decides when to clear:
@@ -232,23 +262,8 @@
         if (hit.container && !hit.container.getAttribute('data-fav-fix-marked')) {
             hit.container.setAttribute('data-fav-fix-marked', isUnrecoverable ? 'nodata' : '1');
         }
-        // Bind tooltip handlers to the whole container so hovering anywhere
-        // on the card triggers them. Read latest data from `__favFixReal`
-        // inside the handler so cache refreshes propagate without re-binding.
-        var bindEl = hit.container || hit.img;
-        if (!bindEl) return;
-        bindEl.__favFixReal = real;
-        if (!bindEl.getAttribute('data-fav-fix-tipbound')) {
-            bindEl.setAttribute('data-fav-fix-tipbound', '1');
-            bindEl.addEventListener('mouseenter', function (e) {
-                if (bindEl.__favFixReal) showTip(bindEl, bindEl.__favFixReal, e);
-            });
-            bindEl.addEventListener('mouseleave', hideTip);
-        }
-        // Inject per-card menu items (复制 AV/BV、复制完整信息、查看封面、
-        // 在 biliplus 打开、清缓存). Safe to call repeatedly; dedup via
-        // data-fav-fix-key on the menu items themselves.
-        try { injectCardMenu(hit, real); }
-        catch (e) { warn('injectCardMenu threw:', e); }
+        // Tooltip + card-menu binding, extracted so the pending branch
+        // (applyPatch) can reuse it without the outline/title work above.
+        bindCardAffordances(hit, real);
     }
 

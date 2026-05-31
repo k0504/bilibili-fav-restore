@@ -35,6 +35,13 @@
             // it). Clear the first-pass loading overlay so the two don't stack.
             clearLoading(hit);
             markPending(hit, _flapBgRunning);
+            // Pending cards used to stop here with only a bare badge — no
+            // tooltip, none of our menu items. Give them the same hover tooltip
+            // (now a 重试中/待重试 state explainer) and card menu (now incl.
+            // "立即重试") as patched cards, minus the outline/title: those stay
+            // native ("已失效视频") so the card remains re-detectable and gets
+            // upgraded in place the moment a walk recovers it.
+            bindCardAffordances(hit, real);
             return 'pending';
         }
         // Recovered (or android-down degenerate): drop any retry badge first.

@@ -33,6 +33,12 @@
         _phase1AvsCache.clear();
         _missingBannerShown.clear();
         _missingInFlight.clear();
+        // Flap loop's give-up set is folder-scoped (08-resolver.js); drop it so
+        // the new folder's "立即重试" can't re-arm the loop with the old folder's
+        // avs. The loop itself bails on detectMediaId() mismatch, but clearing
+        // here keeps kickManualRetry's leftover lookup honest.
+        _flapLeftover.clear();
+        _flapLeftoverMid = null;
     }
 
     async function fetchAllAvList(mediaId) {
