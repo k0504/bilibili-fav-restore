@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.8.17
+// @version      0.9.0
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -37,7 +37,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.8.17)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.9.0)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -82,7 +82,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.8.17';
+    var CORE_VERSION = '0.9.0';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -129,6 +129,49 @@
     // collections; larger ones skip the (unreliable) missing banner rather
     // than emit a false positive.
     var MAX_PAGE_WALK = 50;
+
+    // ─── Android flap recovery (background) ─────────────────────────────
+    // The android fav endpoint is eventually-consistent: ~5% of invalid
+    // items drop in/out across consecutive walks (same access_key, same
+    // mediaId, seconds apart — confirmed by a 3-walk diagnostic returning
+    // 888 / 879 / 887 of a claimed 923). Crucially the drop is NOT uniform:
+    // deactivated-account / short-legacy-aid items are 7.6x over-represented,
+    // so the stubborn subset misses far more than 5% per walk. A single extra
+    // walk only recovers the easy half. The statistically-correct fix is to
+    // UNION several INDEPENDENT walks — each walk is a fresh server sample, so
+    // P(still missing after N) ≈ (per-walk miss)^N.
+    //
+    // ONE background loop (runFlapRecovery in 08-resolver.js) owns the ENTIRE
+    // retry lifecycle for a folder — it is the SOLE retry path. No cache-TTL
+    // timer, no scroll-to-retry: the loop re-walks android on an ADAPTIVE
+    // backoff and live-patches each recovered card until everything recovers
+    // or it gives up. The cadence AND the give-up are driven by one counter:
+    //   - recovered ≥1 this walk → dry resets to 0 → sample again fast
+    //   - recovered  0 this walk → dry++           → wait longer next walk
+    // So while items keep flapping back it samples quickly; once recoveries
+    // dry up it eases off and finally stops (dry === FLAP_MAX_DRY). This makes
+    // a still-flapping folder converge fast while a genuinely-deleted set is
+    // abandoned after ~7 cheap samples instead of being hammered.
+    var FLAP_BACKOFF_MS = [1000, 2000, 5000, 15000, 30000, 60000, 120000];
+    //   Delay BEFORE the next walk, indexed by the current dry count (clamped
+    //   to the last entry). Front-loaded burst (1-5s) catches seconds-level
+    //   flapping; the tail widens to a gentle 2-min cadence for stubborn items.
+    var FLAP_MAX_DRY        = 7;                  // give up after this many consecutive 0-recovery walks
+    var FLAP_TIME_BUDGET_MS = 30 * 60 * 1000;     // 30-min overall hard ceiling (active-recovery backstop)
+
+    // Missing-item banner baseline (fetchFullPhase1Avs in 13-missing.js). The
+    // "静默丢弃 N 项" count = (ids inventory) MINUS (what the paginated source
+    // actually returned). When that source is android, a SINGLE walk drops a
+    // large, VARIABLE fraction to flap (observed 42/89 = 47% on one walk), so a
+    // one-walk baseline falsely flags those as dropped and inflates N. UNION
+    // independent android walks until the union STOPS GROWING — an item only
+    // counts dropped if EVERY walk missed it. A fixed walk count is fragile
+    // (flap rate varies per folder/moment: too few → over-report, too many →
+    // wasted load), so converge like runFlapRecovery instead: keep walking
+    // until MISSING_DRY_ROUNDS consecutive walks add 0 new avs (union saturated),
+    // capped at MISSING_MAX_WALKS. public is stable → one walk.
+    var MISSING_DRY_ROUNDS = 2;   // union saturated after this many 0-new walks
+    var MISSING_MAX_WALKS  = 8;   // hard backstop on android union walks
 
     // One bilibili fav "card" across the modern + legacy layouts. Single
     // source of truth shared by findInvalidContainers Strategy 2 (scope the
@@ -968,10 +1011,15 @@
     var CACHE_PREFIX  = 'item:av';
     var CACHE_VERSION = 5;   // bumped: +_degenerate flag (short TTL on no-cover-no-title merges)
     var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
-    // Short TTL for degenerate merges (no cover + no title from any source).
-    // Android API has walk-to-walk variability — same av sometimes appears
-    // on a page, sometimes doesn't. A 30-day lock-in turns one bad walk
-    // into a permanent failure; 10 min lets the next patchOnce retry.
+    // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
+    // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
+    // by the background runFlapRecovery loop (08-resolver.js), which re-walks
+    // android on its own backoff and re-patches in place. The short TTL only
+    // governs what a FUTURE fresh resolve (a reload / folder-switch minutes or
+    // hours later) does — after it expires, that fresh resolve re-fetches and
+    // re-kicks the loop instead of reusing a stale "still deleted" snapshot.
+    // A 30-day lock-in would instead turn one bad android walk into a permanent
+    // failure, so these stay short.
     var CACHE_TTL_DEGENERATE_MS = 1000 * 60 * 10;   // 10 min
 
     function loadCache(av) {
@@ -981,7 +1029,15 @@
             log('cache av', av, 'version', v._cache_version, '!=', CACHE_VERSION, '— invalidating');
             return null;
         }
-        var ttl = v._degenerate ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+        // Short TTL for any NOT-confidently-recovered entry:
+        //   _degenerate — some source returned only placeholders, or
+        //   _pending    — android may still flap the real snapshot back in
+        //                 (see runFlapRecovery in 08-resolver.js).
+        // Locking these for 30 days would turn a transient android walk-to-walk
+        // drop into a permanent "deleted" (observed: a war-footage folder where
+        // android returned 58/89 on one walk and the dropped items all fell to
+        // _no_source). Only a confidently-recovered merge gets the long TTL.
+        var ttl = (v._degenerate || v._pending) ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
@@ -1109,84 +1165,19 @@
             }
         }
 
-        // ─── Phase 1.5: Android flap retry ─────────────────────────────
-        // Bilibili's android API is empirically non-deterministic: ~5% of
-        // avs flap in/out across consecutive walks (same access_key, same
-        // mediaId, seconds apart). Confirmed by 3-walk diagnostic on
-        // mediaId=1687751814: walks returned 888 / 879 / 887 avs from a
-        // claimed total of 923, with 44 avs (5%) appearing in some walks
-        // but not others. Flapping correlates strongly with deactivated
-        // accounts (7.6x over-represented) and short legacy aids — bilibili
-        // is doing eventually-consistent server-side filtering for items
-        // in a boundary state (account suspended / under review / etc).
-        //
-        // Detection: av must satisfy ALL THREE
-        //   1. android missing in pageItems (flap symptom)
-        //   2. public present (confirms the av exists; avoids retrying truly
-        //      missing items where retry won't help)
-        //   3. public's data is degenerate — both cover AND title fail
-        //      QUALITY. This is the crucial guard: VALID videos can also
-        //      flap (android drops them), but their public entry has real
-        //      cover/title so the merge is fine without android. Only the
-        //      INVALID-and-android-flapped case actually benefits from
-        //      retry, and that's exactly the set this filter selects.
-        //
-        // Without guard #3, every page with healthy-but-android-missing
-        // items triggers a wasteful full android walk (~5-8s) and freezes
-        // all loading spinners for the entire patch cycle. With it, normal
-        // browsing pays 0 cost; only patches with actual degenerate-
-        // candidates incur the retry.
-        //
-        // Cost (with guard #3): one extra full android walk (~5-8s) ONLY
-        // when there are real degenerate candidates. Early-exits as soon
-        // as all candidates are recovered (typically pn=1-3).
-        var flapCandidates = (SOURCES.android.enabled())
-            ? todoAvs.filter(function (av) {
-                if (pageItems.has('android|' + av)) return false;
-                var p = pageItems.get('public|' + av);
-                if (!p) return false;
-                // Public has the av — would the merge be degenerate WITHOUT
-                // android? If public alone has good cover OR good title,
-                // merge is fine, no retry needed.
-                var pubCoverOk = QUALITY.cover(p.cover) >= 5;
-                var pubTitleOk = QUALITY.title(p.title) >= 10;
-                return !pubCoverOk && !pubTitleOk;
-            })
-            : [];
-        if (flapCandidates.length) {
-            log('android flap retry for', flapCandidates.length, 'av(s):',
-                flapCandidates.slice(0, 5).join(',') + (flapCandidates.length > 5 ? ',…' : ''));
-            // Wipe android page cache so ensurePage re-issues network calls
-            // instead of returning the cached page Promises from phase 1.
-            // Only touch THIS mediaId's keys; other media's caches are
-            // untouched (unlikely to matter — only one favlist per page —
-            // but safer).
-            var pcKeys = [];
-            pageCache.forEach(function (_, k) { pcKeys.push(k); });
-            for (var ki = 0; ki < pcKeys.length; ki++) {
-                if (pcKeys[ki].indexOf('android|' + mediaId + '|') === 0) {
-                    pageCache.delete(pcKeys[ki]);
-                }
-            }
-            var pn = 1, MAX_PN = MAX_PAGE_WALK;
-            while (pn <= MAX_PN) {
-                var allFound = flapCandidates.every(function (av) { return pageItems.has('android|' + av); });
-                if (allFound) { log('android flap retry: all candidates recovered at pn=' + pn); break; }
-                var page;
-                try { page = await ensurePage('android', mediaId, pn); }
-                catch (e) { warn('android flap retry pn ' + pn + ' failed:', e.message); break; }
-                if (!page.has_more) break;
-                pn++;
-            }
-            // Log final outcome for visibility.
-            var stillMissing = flapCandidates.filter(function (av) { return !pageItems.has('android|' + av); });
-            if (stillMissing.length) {
-                log('android flap retry: ' + (flapCandidates.length - stillMissing.length) + '/' + flapCandidates.length
-                    + ' recovered;', stillMissing.length, 'still missing (likely permanent filter, falling through to 3rd-party)');
-            } else {
-                log('android flap retry: ' + flapCandidates.length + '/' + flapCandidates.length + ' recovered');
-            }
-        }
+        // ─── Phase 1.5 (REMOVED — now background) ──────────────────────
+        // The android fav endpoint is eventually-consistent (~5% of invalid
+        // items flap in/out per walk; deactivated-account items 7.6x over-
+        // represented — see the FLAP_* block in 01-constants.js for the data).
+        // This used to do ONE synchronous extra android walk here, which (a)
+        // only recovered the easy half of the flappers and (b) froze every
+        // loading spinner for its ~5-8s. It is now a single self-driving
+        // BACKGROUND loop (runFlapRecovery, kicked off at the end of this
+        // function) that re-walks android on an adaptive backoff and re-patches
+        // recovered cards in place — so first paint is never blocked and the
+        // stubborn subset gets the multiple samples it statistically needs.
+        // Phase 2 (3rd-party) still runs synchronously below so first paint has
+        // a best-available cover.
 
         // ─── Phase 2: per-av sources (biliplus, xbeibeix, jijidown) ───
         // Only query 3rd-party archives for avs whose cover OR title is
@@ -1237,51 +1228,250 @@
         }
 
         // ─── Merge ─────────────────────────────────────────────────────
+        // Terminal-vs-retriable classification (the crux of android flap
+        // handling): when android is UP, an item that came back with no usable
+        // cover/title THIS pass is NOT terminal. android's fav endpoint is
+        // eventually-consistent and, for some folders, badly so (observed: a
+        // war-footage folder returned 58/89 on one walk; `public` returns ZERO
+        // invalid snapshots for it, so android is the only source). An item
+        // android flapped out this pass therefore lands as either:
+        //   - _no_source  (no source had it — public doesn't carry invalids here)
+        //   - _degenerate (only placeholders)
+        // Either way android may return its real snapshot on a LATER walk, so we
+        // flag it `_pending` (short TTL, card kept in the native "已失效视频"
+        // state = re-detectable, no terminal "（视频已删除）") and let
+        // runFlapRecovery chase it across several union walks. Only when android
+        // is DOWN (no access_key → no retry possible) do we write the terminal
+        // _no_source stub ("（视频已删除）", long TTL).
+        var androidUp = SOURCES.android.enabled();
         todoAvs.forEach(function (av) {
             var perSource = {};
             for (var s2 = 0; s2 < srcOrder.length; s2++) {
                 var item = pageItems.get(srcOrder[s2] + '|' + av);
                 if (item) perSource[srcOrder[s2]] = item;
             }
+            var attempted = attemptedPerAv.get(av);
+            var rec;
             if (Object.keys(perSource).length === 0) {
-                // None of the 4 sources have this av. Still emit a stub
-                // merged record + persist it, so:
-                //   - patchOnce sees an entry and runs markPatched (lets
-                //     the user see "we tried" rather than "did nothing").
-                //   - markPatched can render the unrecoverable styling
-                //     based on `_no_source` flag.
-                //   - the GM cache short-circuits the next page reload
-                //     instead of re-walking 4 dead sources.
-                var attemptedStub = attemptedPerAv.get(av);
-                var stub = {
+                // No source returned this av this pass.
+                rec = {
                     oid: Number(av),
-                    _no_source: true,
                     // _attempted: union of every source that queried this av
                     // (phase 1 paginated + phase 2 per-av). Tooltip "已查询
-                    // 但无记录" reads this. Old cache entries used the
-                    // narrower _attempted_3rd field; tooltip falls back.
-                    _attempted: attemptedStub ? Array.from(attemptedStub) : [],
+                    // 但无记录" reads this; old entries used _attempted_3rd.
+                    _attempted: attempted ? Array.from(attempted) : [],
                     _tried_sources: srcOrder.slice()
                 };
-                log('av', av, 'NOT FOUND in any source — caching stub');
-                saveCache(av, stub);
-                result.set(av, stub);
-                return;
+                if (androidUp) {
+                    rec._pending = true;   // retriable via background android re-walk
+                    log('av', av, 'not found this pass — pending (android may flap it back)');
+                } else {
+                    rec._no_source = true; // terminal: no android to retry with
+                    log('av', av, 'NOT FOUND in any source — caching stub (android down)');
+                }
+            } else {
+                rec = mergeBySource(perSource);
+                if (attempted) rec._attempted = Array.from(attempted);
+                // Degenerate (placeholders only) but android could still recover
+                // it on a later walk → keep retriable instead of stuck.
+                if (rec._degenerate && androidUp) rec._pending = true;
+                log('av', av, 'merged from {' + Object.keys(perSource).join(',') + '}',
+                    attempted ? '(attempted: ' + Array.from(attempted).join(',') + ')' : '',
+                    '→', 'cover=' + (rec._src_cover || '·'),
+                    'title=' + (rec._src_title || '·'),
+                    'upper=' + (rec._src_upper || '·'),
+                    'cnt=' + (rec._src_cnt_info || '·'),
+                    'dates=' + (rec._src_pubtime || rec._src_fav_time || '·'),
+                    rec._pending ? '[pending]' : '');
             }
-            var merged = mergeBySource(perSource);
-            var attempted = attemptedPerAv.get(av);
-            if (attempted) merged._attempted = Array.from(attempted);
-            log('av', av, 'merged from {' + Object.keys(perSource).join(',') + '}',
-                attempted ? '(attempted: ' + Array.from(attempted).join(',') + ')' : '',
-                '→', 'cover=' + (merged._src_cover || '·'),
-                'title=' + (merged._src_title || '·'),
-                'upper=' + (merged._src_upper || '·'),
-                'cnt=' + (merged._src_cnt_info || '·'),
-                'dates=' + (merged._src_pubtime || merged._src_fav_time || '·'));
-            saveCache(av, merged);
-            result.set(av, merged);
+            saveCache(av, rec);
+            result.set(av, rec);
         });
+
+        // ─── Background: recover stubborn android flappers ───────────────
+        // (replaces the old synchronous phase 1.5; see runFlapRecovery below)
+        // Candidates = every item still `_pending` after phase 1 + phase 2:
+        // android either flapped it out entirely (_no_source-would-have-been)
+        // or only placeholders came back. android's per-walk flapping means
+        // more independent UNION walks materially raise the hit rate. Fire-and-
+        // forget: the caller paints from `result` immediately; recovered cards
+        // are re-patched in place as each walk lands (they stay "已失效视频" so
+        // findInvalidContainers keeps finding them until upgraded).
+        if (androidUp) {
+            var bgCandidates = todoAvs.filter(function (av) {
+                var m = result.get(av);
+                return m && m._pending;
+            });
+            if (bgCandidates.length) {
+                runFlapRecovery(mediaId, bgCandidates)
+                    .catch(function (e) { warn('flap-bg threw:', e && e.message); });
+            }
+        }
+
         return result;
+    }
+
+    // ─── Background android flap recovery (single self-driving loop) ─────
+    // THE retry mechanism. One loop owns a folder's whole retry lifecycle:
+    // re-walks the android fav endpoint, UNIONing each fresh server sample into
+    // pageItems, until every candidate recovers or it gives up. Each walk is a
+    // new chance to catch an item the previous walk's eventually-consistent
+    // filtering dropped. There is no other retry path — no cache-TTL timer, no
+    // scroll-to-retry; the short _pending TTL in 07-cache.js is now purely a
+    // staleness guard for a future fresh page load, NOT a retry trigger.
+    //
+    // Adaptive backoff (FLAP_BACKOFF_MS / FLAP_MAX_DRY in 01-constants.js): the
+    // `dry` counter drives BOTH cadence and termination. A walk that recovers
+    // something resets dry → next walk fires after the short burst gap; a walk
+    // that recovers nothing bumps dry → the gap widens and, at FLAP_MAX_DRY,
+    // the loop concludes the leftovers are genuinely filtered and stops. So a
+    // still-flapping folder is sampled fast and converges; a truly-deleted set
+    // is abandoned after ~7 cheap samples (~4 min) instead of being hammered.
+    //
+    // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
+    // merge and call schedule(). The still-pending cards remain detectable by
+    // findInvalidContainers Strategy 2 (their title is still "已失效视频"), and
+    // loadCache now returns the good merge, so patchOnce's fast path swaps
+    // cover+title in place — no stored DOM hits to go stale across bilibili's
+    // virtualized scroll, no spinner re-flash (recovered avs hit the cache fast
+    // path, not the resolver). Cards still pending while the loop is alive show
+    // a "重试中" badge (markPending reads _flapBgRunning); they flip to "待重试"
+    // only once the loop terminates (the finally's schedule()).
+    //
+    // Concurrency / race notes:
+    //   - Single loop at a time (_flapBgRunning, true for the loop's WHOLE life
+    //     including backoff sleeps). Re-entry is a no-op. Backoff sleeps are
+    //     sliced ~1s so a folder switch frees _flapBgRunning within a second —
+    //     the next folder's resolve (fired after the SPA settle delay) can then
+    //     start its own loop instead of being locked out for minutes.
+    //   - Walks call SOURCES.android.fetchPage DIRECTLY (not ensurePage) and
+    //     write only pageItems — never pageCache. This deliberately bypasses
+    //     the page-promise cache (we WANT a fresh sample each round) AND avoids
+    //     racing a concurrent foreground ensurePage walk that shares pageCache.
+    //     pageItems writes are same-shaped overwrites, safe under JS's single
+    //     thread (no await mid-write).
+    //   - Bails the instant the folder changes (detectMediaId() !== mediaId);
+    //     dropAllInMemory() on SPA folder-switch clears pageItems out from
+    //     under us, which is fine — we re-check before each page, walk, and
+    //     backoff slice.
+    var _flapBgRunning = false;
+    // Avs the loop GAVE UP on (still pending after it stopped), kept so a card's
+    // "立即重试" menu item (kickManualRetry) can re-arm the loop with the WHOLE
+    // leftover set in one walk instead of chasing a single av. Scoped to one
+    // folder via _flapLeftoverMid; cleared on folder switch (dropAllInMemory).
+    var _flapLeftover = new Set();
+    var _flapLeftoverMid = null;
+    async function runFlapRecovery(mediaId, candidates) {
+        if (_flapBgRunning) return;
+        if (!candidates || !candidates.length) return;
+        if (!SOURCES.android.enabled()) return;
+        _flapBgRunning = true;
+        // Flip any on-screen pending badges to "重试中" right away: the loop may
+        // sleep on its first backoff before any recovery-driven schedule(), and
+        // a MANUAL re-arm has nothing else to repaint the cards.
+        schedule();
+        var pending = new Set(candidates.map(String));
+        var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
+        var walk = 0, dry = 0;
+        try {
+            log('flap-bg: start', pending.size, 'candidate(s):',
+                Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
+            while (pending.size && dry < FLAP_MAX_DRY) {
+                if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
+                if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); break; }
+                walk++;
+
+                // One fresh android walk straight into pageItems.
+                var pn = 1;
+                while (pn <= MAX_PAGE_WALK) {
+                    if (detectMediaId() !== mediaId || Date.now() > deadline) break;
+                    var allFound = true;
+                    pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
+                    if (allFound) break;
+                    var page;
+                    try { page = await SOURCES.android.fetchPage({ mediaId: mediaId, pn: pn }); }
+                    catch (e) { warn('flap-bg walk ' + walk + ' pn ' + pn + ' failed:', e.message); break; }
+                    (page.list || []).forEach(function (it) {
+                        if (it && it.oid != null) pageItems.set('android|' + it.oid, it);
+                    });
+                    if (!page.has_more) break;
+                    pn++;
+                }
+
+                // Promote any candidate android now covers with usable data.
+                var recovered = [];
+                Array.from(pending).forEach(function (av) {
+                    var aItem = pageItems.get('android|' + av);
+                    if (!aItem) return;
+                    if (QUALITY.cover(aItem.cover) < 5 && QUALITY.title(aItem.title) < 10) return;
+                    var perSource = {};
+                    Object.keys(SOURCES).forEach(function (s) {
+                        var it = pageItems.get(s + '|' + av);
+                        if (it) perSource[s] = it;
+                    });
+                    var merged = mergeBySource(perSource);
+                    if (merged._degenerate) return;   // still no good cover/title — keep trying
+                    saveCache(av, merged);
+                    pending.delete(av);
+                    recovered.push(av);
+                });
+
+                if (recovered.length) {
+                    dry = 0;   // progress → reset cadence to the burst gap and keep sampling fast
+                    log('flap-bg walk ' + walk + ': recovered', recovered.length,
+                        '→ re-patch;', pending.size, 'left');
+                    // Upgrade on-screen cards via the normal fast path.
+                    schedule();
+                } else {
+                    dry++;     // no progress → widen the gap, step toward giving up
+                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
+                }
+
+                if (!pending.size || dry >= FLAP_MAX_DRY) break;
+
+                // Adaptive backoff before the next walk: gap widens with `dry`.
+                // Sleep in ~1s slices so a folder switch / budget expiry breaks
+                // out within a second (frees _flapBgRunning for the next folder).
+                var gap = FLAP_BACKOFF_MS[Math.min(dry, FLAP_BACKOFF_MS.length - 1)];
+                var until = Date.now() + gap;
+                while (Date.now() < until) {
+                    if (detectMediaId() !== mediaId || Date.now() > deadline) break;
+                    await new Promise(function (r) { setTimeout(r, Math.min(1000, until - Date.now())); });
+                }
+            }
+            log('flap-bg: done after', walk, 'walk(s);', pending.size,
+                'still unrecovered (stays 待重试 until a fresh reload re-attempts)');
+        } finally {
+            _flapBgRunning = false;
+            // Remember the avs we gave up on so a card's "立即重试" can re-arm
+            // the loop over the WHOLE leftover set (not just the clicked card).
+            // If the loop recovered everything, pending is empty → no leftover →
+            // the retry menu item won't render (cards are no longer _pending).
+            _flapLeftover = new Set(pending);
+            _flapLeftoverMid = mediaId;
+            // Re-run the patch pass with the loop now inactive so any still-
+            // pending cards flip their badge from "重试中" to "待重试".
+            // Recovered cards already upgraded via the per-walk schedule() calls.
+            schedule();
+        }
+    }
+
+    // Manual re-arm of the flap loop from a card's "立即重试" menu item. Re-runs
+    // THE loop (runFlapRecovery) over every av it gave up on in THIS folder, so a
+    // single android walk recovers all still-pending cards, not just the clicked
+    // one. Falls back to [clickedAv] if the leftover set is stale/empty (e.g. a
+    // fresh page load started a new loop). No-op with a toast if a loop is alive
+    // (the card already shows 重试中) or android is unavailable.
+    function kickManualRetry(clickedAv) {
+        var mid = detectMediaId();
+        if (!mid) { toast('无法识别当前收藏夹', 'warn'); return; }
+        if (!SOURCES.android.enabled()) { toast('android 接口不可用，无法重试', 'warn'); return; }
+        if (_flapBgRunning) { toast('后台正在重试中，请稍候', 'ok'); return; }
+        var cands = (_flapLeftoverMid === mid) ? Array.from(_flapLeftover) : [];
+        if (!cands.length && clickedAv) cands = [String(clickedAv)];
+        if (!cands.length) { toast('没有待重试的视频', 'ok'); return; }
+        toast('正在重新抓取 ' + cands.length + ' 项待重试视频', 'ok');
+        runFlapRecovery(mid, cands).catch(function (e) { warn('manual retry threw:', e); });
     }
 
     // ─── URL / page detection ───────────────────────────────────────────
@@ -1655,6 +1845,31 @@
                  + 'fav-fix · 视频可能已被永久删除' + '</div>';
         }
 
+        // Pending — still being chased by the background android flap loop, or
+        // waiting for a future retry after it gave up. There's no good snapshot
+        // yet, so render a state-aware explainer (NOT the normal rich layout
+        // with empty fields). _flapBgRunning is read LIVE here — showTip rebuilds
+        // innerHTML on every hover — so the text tracks whether the loop is
+        // currently alive (重试中) or has stopped (待重试), matching the badge.
+        if (real._pending) {
+            var pav = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : '');
+            var pbv = real.bvid || (pav ? avToBv(pav) : null);
+            var pActive = _flapBgRunning;
+            var pHead = pActive ? '正在找回此视频快照…' : '暂未找回，等待重试';
+            var pBody = pActive
+                ? 'bilibili 的 android 收藏接口会随机漏掉一部分失效视频，脚本正在后台多次重新采样把它捞回来。找回后本卡片会自动更新封面与标题，无需手动操作。'
+                : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。';
+            return '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:#fff;'
+                 + 'line-height:1.35;border-bottom:1px solid rgba(255,255,255,.12);padding-bottom:6px">'
+                 + esc(pHead) + '</div>'
+                 + (pav ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">AV ' + codeTag('av' + pav) + '</div>' : '')
+                 + (pbv ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">BV ' + codeTag(pbv) + '</div>' : '')
+                 + '<div style="margin-top:6px;color:#bdbdc2;font-size:11px;line-height:1.55">'
+                 + esc(pBody) + '</div>'
+                 + '<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#666;font-size:10px">'
+                 + 'fav-fix · ' + (pActive ? '重试中（后台自动）' : '待重试') + '</div>';
+        }
+
         var parts = [];
 
         // Title — full width, bold, with source chip after the title text.
@@ -1847,8 +2062,23 @@
 
     function buildMenuItems(hit, real) {
         var av = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : null);
+        // Re-read the freshest cache entry. The `real` captured when injectCardMenu
+        // bound this card's dropdown can be STALE: a pending card may have since
+        // recovered (or vice-versa), and the new-UI popper handler keeps the
+        // original closure. av/bv identity is stable, but _pending / title /
+        // sources may have changed — build from the live entry so a recovered
+        // card never shows "立即重试" and a pending card never copies an empty
+        // snapshot. (buildMenuItems runs fresh on each menu open, so this stays
+        // current.)
+        if (av) { var _lc = loadCache(av); if (_lc) real = _lc; }
         var bv = real.bvid || (av ? avToBv(av) : null);
         var items = [];
+        // Primary action for a still-pending card: re-arm THE flap loop now
+        // instead of waiting for the next page reload. Only shown while _pending.
+        if (av && real._pending) items.push({
+            key: 'retry', label: '立即重试',
+            onClick: function () { kickManualRetry(av); }
+        });
         if (av) items.push({
             key: 'cp-av', label: '复制 AV 号',
             successMsg: '已复制 av' + av + ' 至剪贴板',
@@ -1883,7 +2113,15 @@
                              { active: true, insert: true, setParent: true });
             }
         });
-        if (av) items.push({
+        // Hidden on _pending cards: they have no real cached snapshot to clear
+        // (just a placeholder stub), so "清缓存并重抓" is a heavier, noisier
+        // duplicate of "立即重试" (full-page foreground re-resolve + spinner
+        // re-flash vs. a quiet android re-walk). The two retry-flavored actions
+        // are mutually exclusive by card state: 立即重试 for pending, 清缓存并重抓
+        // for recovered/terminal cards where nuking a possibly-wrong snapshot
+        // actually means something. (real is the live loadCache re-read above,
+        // so this self-corrects as the card transitions pending↔recovered.)
+        if (av && !real._pending) items.push({
             // Label kept short to avoid wrapping inside bilibili's
             // fixed-width card-menu popper. "清除本条缓存并重新抓取" (11
             // chars) wrapped to two lines and the second line overflowed
@@ -1996,12 +2234,18 @@
 
     function appendMenuItems(popper, items, opts) {
         // opts: { itemClass, itemTag }
-        var existingKeys = new Set(
-            Array.from(popper.querySelectorAll('[data-fav-fix-key]'))
-                 .map(function (el) { return el.getAttribute('data-fav-fix-key'); })
-        );
+        // Clear-then-append, NOT dedup-by-key. bilibili's new-UI dropdown reuses
+        // / pools popper nodes across cards (observed: the same popper, or a
+        // small pool, serves whichever card is hovered). The old dedup-by-key
+        // kept the FIRST card's items when a different card reused the popper —
+        // so a card could show a previous card's stale av bindings, or (once the
+        // item set became state-specific) a recovered card showing 立即重试 / a
+        // pending card showing 清缓存并重抓. Removing our prior items first
+        // guarantees the popper reflects ONLY the current card. The handler
+        // re-runs on every trigger mouseenter, so this stays fresh; it only ever
+        // touches our own [data-fav-fix-key] nodes, never bilibili's.
+        Array.from(popper.querySelectorAll('[data-fav-fix-key]')).forEach(function (el) { el.remove(); });
         items.forEach(function (it) {
-            if (existingKeys.has(it.key)) return;
             var el = document.createElement(opts.itemTag || 'div');
             el.className = opts.itemClass + ' bili-fav-fix-menu-item';
             el.setAttribute('data-fav-fix-key', it.key);
@@ -2187,12 +2431,121 @@
         }
     }
 
+    // ─── Retry indicator (background android flap recovery) ──────────────
+    //   A small corner badge on the cover so the user can SEE that a deleted
+    //   item is being re-fetched in the background (runFlapRecovery), instead
+    //   of the card looking inert. Two states:
+    //     active=true  → spinning dot + "重试中" (loop alive — owns the retry,
+    //                    keeps sampling android on its backoff)
+    //     active=false → static gray + "待重试" (loop gave up; a fresh reload
+    //                    re-kicks it, OR the card's "立即重试" menu item does so
+    //                    on demand via kickManualRetry)
+    //   The badge is just the at-a-glance cue; the FULL explanation of what
+    //   重试中/待重试 mean lives in the card's hover tooltip (buildTipHtml's
+    //   _pending branch), bound for pending cards via bindCardAffordances.
+    //   Removed by clearPending() the moment the item recovers (real cover) or
+    //   is written terminal. Distinct from markLoading's full-cover overlay so
+    //   it reads as "still trying" rather than "page loading". No emoji.
+    var _retryStylesInjected = false;
+    function ensureRetryStyles() {
+        if (_retryStylesInjected) return;
+        _retryStylesInjected = true;
+        var st = document.createElement('style');
+        st.id = '__fav_fix_retry_styles';
+        st.textContent = [
+            '@keyframes __fav_fix_retry_spin { to { transform: rotate(360deg); } }',
+            '@keyframes __fav_fix_retry_pulse { 0%,100%{opacity:.95} 50%{opacity:.5} }',
+            '.fav-fix-retry-badge {',
+            '  position:absolute; left:6px; top:6px; z-index:2147483646;',
+            '  display:flex; align-items:center; gap:5px;',
+            '  padding:3px 7px; border-radius:10px;',
+            '  font:600 11px/1 -apple-system,Segoe UI,sans-serif;',
+            '  color:#fff; background:rgba(192,57,43,.82);',
+            '  pointer-events:none; user-select:none;',
+            '}',
+            '.fav-fix-retry-badge .fav-fix-retry-dot {',
+            '  width:9px; height:9px; border-radius:50%;',
+            '  border:2px solid rgba(255,255,255,.4); border-top-color:#fff;',
+            '  animation:__fav_fix_retry_spin .8s linear infinite;',
+            '}',
+            '.fav-fix-retry-badge.waiting {',
+            '  background:rgba(127,140,141,.8);',
+            '  animation:__fav_fix_retry_pulse 1.8s ease-in-out infinite;',
+            '}',
+            '.fav-fix-retry-badge.waiting .fav-fix-retry-dot { animation:none; border-top-color:rgba(255,255,255,.55); }'
+        ].join('\n');
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    function markPending(hit, active) {
+        if (!hit || !hit.img) return;          // need a cover area to anchor to
+        var coverWrap = hit.img.parentElement;
+        if (!coverWrap) return;
+        ensureRetryStyles();
+        var pos = (coverWrap.ownerDocument.defaultView || window)
+                    .getComputedStyle(coverWrap).position;
+        if (pos === 'static') coverWrap.style.position = 'relative';
+        var badge = coverWrap.querySelector('[data-fav-fix-retry]');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.setAttribute('data-fav-fix-retry', '1');
+            badge.className = 'fav-fix-retry-badge';
+            var dot = document.createElement('span');
+            dot.className = 'fav-fix-retry-dot';
+            var txt = document.createElement('span');
+            txt.setAttribute('data-fav-fix-retry-txt', '1');
+            badge.appendChild(dot);
+            badge.appendChild(txt);
+            coverWrap.appendChild(badge);
+        }
+        badge.classList.toggle('waiting', !active);
+        var t = badge.querySelector('[data-fav-fix-retry-txt]');
+        if (t) t.textContent = active ? '重试中' : '待重试';
+    }
+
+    function clearPending(hit) {
+        if (!hit) return;
+        var scopes = [];
+        if (hit.img && hit.img.parentElement) scopes.push(hit.img.parentElement);
+        if (hit.container) scopes.push(hit.container);
+        for (var s = 0; s < scopes.length; s++) {
+            var b = scopes[s].querySelectorAll('[data-fav-fix-retry]');
+            for (var i = 0; i < b.length; i++) b[i].remove();
+        }
+    }
+
     // ─── Mark a patched item ────────────────────────────────────────────
     //   - solid red outline (4px) on the cover img — uses CSS outline so
     //     it doesn't reflow layout; outline-offset:-4px tucks it inside
     //     the rounded-corner clip so it doesn't bleed past corners
     //   - rich hover tooltip showing title / UP / stats / dates / intro
     //   - data-fav-fix-marked guard avoids double-binding on observer re-runs
+
+    // Bind the hover tooltip + inject our card-menu items onto a card, WITHOUT
+    // touching its cover / outline / title. markPatched calls this for recovered
+    // and terminal cards; applyPatch's pending branch calls it directly so a
+    // card still being chased by the flap loop ALSO gets the rich tooltip (now a
+    // 重试中/待重试 state explainer) and the "立即重试" menu item — previously
+    // pending cards skipped markPatched entirely and were left with only a bare
+    // badge. __favFixReal is read live by the tooltip handler, so a later
+    // markPatched (on recovery) upgrades the tooltip in place without re-binding.
+    function bindCardAffordances(hit, real) {
+        var bindEl = hit.container || hit.img;
+        if (!bindEl) return;
+        bindEl.__favFixReal = real;
+        if (!bindEl.getAttribute('data-fav-fix-tipbound')) {
+            bindEl.setAttribute('data-fav-fix-tipbound', '1');
+            bindEl.addEventListener('mouseenter', function (e) {
+                if (bindEl.__favFixReal) showTip(bindEl, bindEl.__favFixReal, e);
+            });
+            bindEl.addEventListener('mouseleave', hideTip);
+        }
+        // Inject per-card menu items (复制 AV/BV、复制完整信息、查看封面、
+        // 在 biliplus 打开、清缓存、以及 pending 卡的「立即重试」). Safe to call
+        // repeatedly; dedup via data-fav-fix-key on the menu items themselves.
+        try { injectCardMenu(hit, real); }
+        catch (e) { warn('injectCardMenu threw:', e); }
+    }
 
     function markPatched(hit, real) {
         // NOTE: clearLoading() is NOT called here. The caller (patchOnce
@@ -2231,24 +2584,9 @@
         if (hit.container && !hit.container.getAttribute('data-fav-fix-marked')) {
             hit.container.setAttribute('data-fav-fix-marked', isUnrecoverable ? 'nodata' : '1');
         }
-        // Bind tooltip handlers to the whole container so hovering anywhere
-        // on the card triggers them. Read latest data from `__favFixReal`
-        // inside the handler so cache refreshes propagate without re-binding.
-        var bindEl = hit.container || hit.img;
-        if (!bindEl) return;
-        bindEl.__favFixReal = real;
-        if (!bindEl.getAttribute('data-fav-fix-tipbound')) {
-            bindEl.setAttribute('data-fav-fix-tipbound', '1');
-            bindEl.addEventListener('mouseenter', function (e) {
-                if (bindEl.__favFixReal) showTip(bindEl, bindEl.__favFixReal, e);
-            });
-            bindEl.addEventListener('mouseleave', hideTip);
-        }
-        // Inject per-card menu items (复制 AV/BV、复制完整信息、查看封面、
-        // 在 biliplus 打开、清缓存). Safe to call repeatedly; dedup via
-        // data-fav-fix-key on the menu items themselves.
-        try { injectCardMenu(hit, real); }
-        catch (e) { warn('injectCardMenu threw:', e); }
+        // Tooltip + card-menu binding, extracted so the pending branch
+        // (applyPatch) can reuse it without the outline/title work above.
+        bindCardAffordances(hit, real);
     }
 
     // ─── Missing-item recovery (task #15) ────────────────────────────────
@@ -2286,6 +2624,12 @@
         _phase1AvsCache.clear();
         _missingBannerShown.clear();
         _missingInFlight.clear();
+        // Flap loop's give-up set is folder-scoped (08-resolver.js); drop it so
+        // the new folder's "立即重试" can't re-arm the loop with the old folder's
+        // avs. The loop itself bails on detectMediaId() mismatch, but clearing
+        // here keeps kickManualRetry's leftover lookup honest.
+        _flapLeftover.clear();
+        _flapLeftoverMid = null;
     }
 
     async function fetchAllAvList(mediaId) {
@@ -2300,24 +2644,36 @@
     }
 
     // Walk EVERY phase-1 page of the first enabled paginated source until
-    // has_more=false. This is the "what did bilibili actually return for
-    // the whole collection" set. CANNOT use pageItems for this — patchOnce
-    // stops phase 1 the moment all current-page invalid hits are covered,
-    // so pageItems is a partial subset biased toward invalid items. Using
-    // it would massively over-count "missing" on collections where the
+    // has_more=false — and for android, UNION independent walks until the
+    // union stops growing, so the baseline isn't distorted by android's
+    // large/variable per-walk flap. This is the "what did bilibili actually
+    // return for the whole collection" set. CANNOT use pageItems for this —
+    // patchOnce stops phase 1 the moment all current-page invalid hits are
+    // covered, so pageItems is a partial subset biased toward invalid items.
+    // Using it would massively over-count "missing" on collections where the
     // current DOM page has few or no invalid cards. (Was the 0.8.0 bug:
     // a 99-item clean collection reported "static 99 项" because pageItems
     // was empty.)
     //
+    // Why union-to-convergence: a SINGLE android walk drops a large, variable
+    // fraction of invalid items (observed 42/89 = 47% on one walk), so each
+    // falsely lands in the diff as "silently dropped" and inflates the banner.
+    // Unioning walks until MISSING_DRY_ROUNDS in a row add nothing new means an
+    // item only counts dropped if EVERY walk missed it — the same multi-sample
+    // convergence runFlapRecovery (08-resolver.js) uses to recover flappers. A
+    // fixed walk count can't work: the flap rate varies, so it would under- or
+    // over-walk.
+    //
     // Cached per mediaId so a tab that lingers doesn't re-walk on every
     // observer tick. ensurePage adds its own request-level dedup.
     // Returns { avs:Set<avStr>, complete:bool }. `complete` is true ONLY when
-    // the walk reached a natural has_more=false end (i.e. it saw the whole
-    // collection). It is false when the walk stopped early — a page error or
+    // walk 1 reached a natural has_more=false end (i.e. it saw the whole
+    // collection). It is false when walk 1 stopped early — a page error or
     // the MAX_PAGE_WALK cap. Callers MUST NOT compute a "missing" diff against
     // an incomplete walk: the unwalked tail would be falsely flagged as
     // silently-dropped (the >600-item false-positive this `complete` flag
-    // exists to prevent).
+    // exists to prevent). The extra union walks never lower `complete`; they
+    // only add flap-recovered avs to the set.
     async function fetchFullPhase1Avs(mediaId) {
         if (_phase1AvsCache.has(mediaId)) return _phase1AvsCache.get(mediaId);
         var collected = new Set();
@@ -2331,23 +2687,65 @@
             log('fetchFullPhase1Avs: no enabled paginated source — abort');
             return { avs: collected, complete: false };
         }
+
+        // android (eventually-consistent) → union INDEPENDENT walks until the
+        // union STOPS GROWING; public (stable) → one walk. The `dry` counter is
+        // the convergence signal: a walk that adds a new av resets it, a walk
+        // that adds nothing bumps it, and MISSING_DRY_ROUNDS consecutive 0-new
+        // walks means the union has saturated (we've seen everything android
+        // will return for this folder). Capped at MISSING_MAX_WALKS.
+        var isFlappy = (srcName === 'android');
         var complete = false;
-        for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
-            var page;
-            try { page = await ensurePage(srcName, mediaId, pn); }
-            catch (e) {
-                warn('fetchFullPhase1Avs:', srcName, 'page', pn, 'failed:', e.message);
-                break;   // complete stays false — partial walk
+        var walk = 0, dry = 0;
+        while (walk < (isFlappy ? MISSING_MAX_WALKS : 1) && dry < MISSING_DRY_ROUNDS) {
+            walk++;
+            if (walk > 1) {
+                // Gap so each walk is an INDEPENDENT server sample — back-to-back
+                // requests can replay the same eventually-consistent snapshot;
+                // the flap is observable on a ~seconds cadence. Reuse one short
+                // FLAP_BACKOFF_MS step (NOT the indexed widening one — this is a
+                // one-shot baseline, not the live retry's load-shaping).
+                await new Promise(function (r) { setTimeout(r, FLAP_BACKOFF_MS[1]); });
+                if (detectMediaId() !== mediaId) break;   // folder switched mid-union
             }
-            (page.list || []).forEach(function (it) {
-                if (it.oid != null) collected.add(String(it.oid));
-            });
-            if (!page.has_more) { complete = true; break; }
+            var before = collected.size;
+            var walkComplete = false;
+            for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
+                if (detectMediaId() !== mediaId) break;
+                var page;
+                try {
+                    // Walk 1 via ensurePage (reuses pages the live resolve
+                    // already cached + its pageItems writes). Extra walks call
+                    // fetchPage DIRECTLY so they bypass pageCache for a genuinely
+                    // fresh android sample (ensurePage would just replay walk 1's
+                    // cached pages — same reason runFlapRecovery bypasses it).
+                    page = (walk === 1) ? await ensurePage(srcName, mediaId, pn)
+                                        : await SOURCES[srcName].fetchPage({ mediaId: mediaId, pn: pn });
+                } catch (e) {
+                    warn('fetchFullPhase1Avs:', srcName, 'walk', walk, 'page', pn, 'failed:', e.message);
+                    break;   // partial walk
+                }
+                (page.list || []).forEach(function (it) {
+                    if (it.oid != null) collected.add(String(it.oid));
+                });
+                if (!page.has_more) { walkComplete = true; break; }
+            }
+            if (walk === 1) {
+                // `complete` is decided by walk 1 alone — whether we saw the
+                // WHOLE collection (reached has_more=false). If walk 1 was cut
+                // short (cap / page error), we can't diff, so stop (no union).
+                complete = walkComplete;
+                if (!complete) break;
+            } else {
+                // Walk 1 always adds (from empty) so it never trips dry; only
+                // count convergence from walk 2 on.
+                if (collected.size === before) dry++; else dry = 0;
+            }
         }
         var result = { avs: collected, complete: complete };
         _phase1AvsCache.set(mediaId, result);
-        log('fetchFullPhase1Avs: ' + srcName + ' walked → '
-            + collected.size + ' items collected (complete=' + complete + ')');
+        log('fetchFullPhase1Avs: ' + srcName + ' converged in ' + walk + ' walk(s) → '
+            + collected.size + ' avs unioned (complete=' + complete + ', dry=' + dry + ')');
         return result;
     }
 
@@ -2568,9 +2966,33 @@
             // No new cover src to wait for — clear loading overlay now.
             // (No-op for fast-path cards that never had loading marked.)
             clearLoading(hit);
+            clearPending(hit);
             markPatched(hit, real);
             return 'unrecoverable';
         }
+        if (real._pending) {
+            // Still being chased by the background android flap loop
+            // (runFlapRecovery). Leave the card's cover/title untouched (native
+            // "已失效视频" placeholder) so it stays re-detectable and gets
+            // upgraded IN PLACE the moment a walk recovers it — but DO show a
+            // retry indicator so the user can see work is happening: a spinning
+            // "重试中" badge while the loop is alive (it owns the retry and will
+            // keep sampling on its backoff), a static "待重试" once the loop has
+            // given up (only a fresh reload, after the short cache TTL, re-kicks
+            // it). Clear the first-pass loading overlay so the two don't stack.
+            clearLoading(hit);
+            markPending(hit, _flapBgRunning);
+            // Pending cards used to stop here with only a bare badge — no
+            // tooltip, none of our menu items. Give them the same hover tooltip
+            // (now a 重试中/待重试 state explainer) and card menu (now incl.
+            // "立即重试") as patched cards, minus the outline/title: those stay
+            // native ("已失效视频") so the card remains re-detectable and gets
+            // upgraded in place the moment a walk recovers it.
+            bindCardAffordances(hit, real);
+            return 'pending';
+        }
+        // Recovered (or android-down degenerate): drop any retry badge first.
+        clearPending(hit);
         if (real.cover && hit.img) {
             // Defer clearLoading until the new cover actually paints.
             // Without this the overlay vanishes the moment we swap
@@ -2615,12 +3037,15 @@
     // seconds; schedule()'s 400ms debounce clears pendingTick the instant the
     // timer fires, so a later observer tick (or the clear-cache menu, which
     // calls patchOnce directly) could start a SECOND run while the first is
-    // still awaiting. Concurrent runs share pageCache/pageItems and the flap-
-    // retry path even deletes android page-cache keys mid-walk, so they can
-    // clobber each other. Serialize here: if a run is in flight, mark dirty
-    // and let the current run loop once more when it finishes (so the trigger
-    // that arrived mid-run — e.g. a clear-cache that just nuked the cache —
-    // is never dropped).
+    // still awaiting. Concurrent runs share pageCache/pageItems and could
+    // clobber each other mid-walk. Serialize here: if a run is in flight, mark
+    // dirty and let the current run loop once more when it finishes (so the
+    // trigger that arrived mid-run — e.g. a clear-cache that just nuked the
+    // cache, or the background flap recovery calling schedule() after it
+    // upgrades a recovered item — is never dropped). The background flap loop
+    // (runFlapRecovery) itself is NOT serialized by this guard: it runs
+    // outside patchOnce and only writes pageItems (never pageCache), so it
+    // can't corrupt a concurrent foreground walk.
     var _patchInFlight = false;
     var _patchDirty = false;
     async function patchOnce() {
@@ -2965,6 +3390,13 @@
         clearItemCache: clearItemCache,
         resolveItems: resolveItems,
         ensurePage: ensurePage,
+        detectMediaId: detectMediaId,
+        // Manually drive a background android flap-recovery pass for a set of
+        // avs (loop-until-dry; see runFlapRecovery). Useful for verifying the
+        // recovery path, e.g.:
+        //   __biliFavFix.runFlapRecovery(__biliFavFix.detectMediaId(), ['12345'])
+        // No-op if another pass is already running.
+        runFlapRecovery: runFlapRecovery,
         // DOM-layer internals, exposed for diagnostics/verification (same
         // spirit as resolveItems/ensurePage above): inspect what the scanner
         // detects and drive a single card's patch in isolation.
