@@ -111,7 +111,15 @@
                              { active: true, insert: true, setParent: true });
             }
         });
-        if (av) items.push({
+        // Hidden on _pending cards: they have no real cached snapshot to clear
+        // (just a placeholder stub), so "清缓存并重抓" is a heavier, noisier
+        // duplicate of "立即重试" (full-page foreground re-resolve + spinner
+        // re-flash vs. a quiet android re-walk). The two retry-flavored actions
+        // are mutually exclusive by card state: 立即重试 for pending, 清缓存并重抓
+        // for recovered/terminal cards where nuking a possibly-wrong snapshot
+        // actually means something. (real is the live loadCache re-read above,
+        // so this self-corrects as the card transitions pending↔recovered.)
+        if (av && !real._pending) items.push({
             // Label kept short to avoid wrapping inside bilibili's
             // fixed-width card-menu popper. "清除本条缓存并重新抓取" (11
             // chars) wrapped to two lines and the second line overflowed
@@ -224,12 +232,18 @@
 
     function appendMenuItems(popper, items, opts) {
         // opts: { itemClass, itemTag }
-        var existingKeys = new Set(
-            Array.from(popper.querySelectorAll('[data-fav-fix-key]'))
-                 .map(function (el) { return el.getAttribute('data-fav-fix-key'); })
-        );
+        // Clear-then-append, NOT dedup-by-key. bilibili's new-UI dropdown reuses
+        // / pools popper nodes across cards (observed: the same popper, or a
+        // small pool, serves whichever card is hovered). The old dedup-by-key
+        // kept the FIRST card's items when a different card reused the popper —
+        // so a card could show a previous card's stale av bindings, or (once the
+        // item set became state-specific) a recovered card showing 立即重试 / a
+        // pending card showing 清缓存并重抓. Removing our prior items first
+        // guarantees the popper reflects ONLY the current card. The handler
+        // re-runs on every trigger mouseenter, so this stays fresh; it only ever
+        // touches our own [data-fav-fix-key] nodes, never bilibili's.
+        Array.from(popper.querySelectorAll('[data-fav-fix-key]')).forEach(function (el) { el.remove(); });
         items.forEach(function (it) {
-            if (existingKeys.has(it.key)) return;
             var el = document.createElement(opts.itemTag || 'div');
             el.className = opts.itemClass + ' bili-fav-fix-menu-item';
             el.setAttribute('data-fav-fix-key', it.key);
