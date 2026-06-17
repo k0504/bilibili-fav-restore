@@ -1,6 +1,6 @@
     // ─── Hover tooltip (rich) ───────────────────────────────────────────
 
-    // Third-party archives (xbeibeix HTML scrape, biliplus, jijidown) are an
+    // Third-party archives (biliplus, jijidown) are an
     // untrusted boundary: a poisoned/compromised source could return a
     // cover/avatar URL of `javascript:…` or `data:text/html,…`. Setting such
     // a value as img.src is inert (browsers never execute it), but handing it
@@ -89,7 +89,6 @@
         android:   '#5b8def',
         'public':  '#67c23a',
         biliplus:  '#e6a23c',
-        xbeibeix:  '#9b59b6',
         jijidown:  '#f56c6c'
     };
     function srcTag(src) {

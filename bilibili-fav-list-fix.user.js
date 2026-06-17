@@ -29,7 +29,6 @@
 // @connect      hdslb.com
 // @connect      biliplus.com
 // @connect      jijidown.com
-// @connect      xbeibeix.com
 // @license      MIT
 // ==/UserScript==
 

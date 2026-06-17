@@ -39,17 +39,14 @@
     };
 
     // Priority order: source name LEFT wins if its value passes QUALITY.
-    // 3rd-party archives (biliplus / xbeibeix / jijidown) carry only
-    // title/cover/upper.name — they're the last-resort fallback for items
-    // even the Android-app snapshot couldn't save.
+    // 3rd-party archives (biliplus / jijidown) carry only title/cover/
+    // upper.name — they're the last-resort fallback for items even the
+    // Android-app snapshot couldn't save.
     var FIELD_PRIORITY = {
         // Android endpoint preserves invalid-item snapshots for these.
-        // xbeibeix is ordered last among 3rd-party because its cover URLs
-        // are often the same hdslb CDN ones already gone — cerenkov notes
-        // "极大概率是失效的旧图片链接" when not in /bfs/archive/ path.
-        cover:    ['android', 'public', 'biliplus', 'jijidown', 'xbeibeix'],
-        title:    ['android', 'public', 'biliplus', 'jijidown', 'xbeibeix'],
-        upper:    ['android', 'public', 'biliplus', 'jijidown', 'xbeibeix'],
+        cover:    ['android', 'public', 'biliplus', 'jijidown'],
+        title:    ['android', 'public', 'biliplus', 'jijidown'],
+        upper:    ['android', 'public', 'biliplus', 'jijidown'],
         intro:    ['android', 'public'],
         duration: ['android', 'public'],
         playback_desc: ['android', 'public'],

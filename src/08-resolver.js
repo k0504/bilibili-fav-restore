@@ -117,7 +117,7 @@
         // Phase 2 (3rd-party) still runs synchronously below so first paint has
         // a best-available cover.
 
-        // ─── Phase 2: per-av sources (biliplus, xbeibeix, jijidown) ───
+        // ─── Phase 2: per-av sources (biliplus, jijidown) ────────────
         // Only query 3rd-party archives for avs whose cover OR title is
         // still bad after phase 1. Skip entirely if everything is satisfied.
         // attemptedPerAv already tracks phase 1; phase 2 adds 3rd-party

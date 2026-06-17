@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.9.0
+// @version      0.9.1
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -31,13 +31,12 @@
 // @connect      hdslb.com
 // @connect      biliplus.com
 // @connect      jijidown.com
-// @connect      xbeibeix.com
 // @license      MIT
 // ==/UserScript==
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.9.0)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.9.1)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -82,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.9.0';
+    var CORE_VERSION = '0.9.1';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -354,15 +353,6 @@
                 timeout: timeoutMs,
                 onload: function (resp) {
                     var text = resp.responseText;
-                    if (opts.raw) {
-                        // Raw mode: caller wants the response body verbatim
-                        // (HTML scraping / non-JSON sources like xbeibeix).
-                        // Also surface the final URL so callers can detect
-                        // server-side redirects (e.g. xbeibeix bouncing back
-                        // to its landing page when an av isn't archived).
-                        resolve({ status: resp.status, body: text, finalUrl: resp.finalUrl || url });
-                        return;
-                    }
                     // Some responses arrive with no text body — an empty 204,
                     // an opaque/blocked response, or a GM build that leaves
                     // responseText undefined for certain statuses. Guard
@@ -679,8 +669,15 @@
         // Per-AV (not paginated). The resolver calls fetchAvs(avs) ONLY
         // for avs whose cover or title is still poor quality after the
         // paginated sources (android + public) finish — gates expensive
-        // off-site calls. Both sites rate-limit aggressively, so we
-        // retry-once on -503 and otherwise just skip the missing av.
+        // off-site calls. biliplus rate-limits with code -503 (retry-once);
+        // jijidown answers a cold aid with a "loading" stub first and only
+        // serves the real record on a follow-up poll (see its fetchAvs).
+        //
+        // (xbeibeix was removed: the whole site now sits behind Cloudflare's
+        // interactive Turnstile challenge, which GM_xmlhttpRequest cannot
+        // solve — every request returned the "Just a moment…" page. The
+        // missing-item banner in 13-missing.js still links xbeibeix.com for
+        // MANUAL clicks, which a real browser CAN clear.)
         //
         // Failure backoff (sourceFailureGate): if a source eats its full
         // per-request timeout (5s) on N consecutive chunks, we mark it
@@ -699,8 +696,8 @@
                 console.info('[fav-fix/biliplus] querying', avs.length, 'av(s):',
                              avs.slice(0, 5).join(',') + (avs.length > 5 ? ',…' : ''));
                 var CHUNK = 50;
-                // All 3rd-party archives (biliplus / xbeibeix / jijidown)
-                // are best-effort fallbacks; never let a slow archive hold
+                // All 3rd-party archives (biliplus / jijidown) are
+                // best-effort fallbacks; never let a slow archive hold
                 // up patching the DOM. Per-chunk timeout 5s (vs gmGet's 15s
                 // default) keeps the worst case bounded.
                 var REQ_TIMEOUT = 5000;
@@ -754,80 +751,6 @@
                 return out;
             }
         },
-        xbeibeix: {
-            name: 'xbeibeix',
-            paginated: false,
-            enabled: function () { return sourceFailureGate.isOpen('xbeibeix'); },
-            // xbeibeix is BV-keyed HTML scraping (no JSON API), so:
-            //   - we avToBv each av before request
-            //   - parse the response with DOMParser
-            //   - title from `.fw-bold`, cover from `img.img-thumbnail`,
-            //     author from the first `<input>` value
-            // It also gates behind a CAPTCHA on heavy traffic; detected by
-            // the `<meta name="robots">` tag (cerenkov's check). When that
-            // happens we skip the av silently — the user can verify human
-            // manually by visiting any xbeibeix.com/video/BVx URL once.
-            fetchAvs: async function (avs) {
-                var out = new Map();
-                if (!avs.length) return out;
-                console.info('[fav-fix/xbeibeix] querying', avs.length, 'av(s) (sequential, HTML):',
-                             avs.slice(0, 5).join(',') + (avs.length > 5 ? ',…' : ''));
-                var REQ_TIMEOUT = 5000;
-                var sawAnyResponse = false;     // any HTTP-level success (incl. redirect / robots)
-                for (var i = 0; i < avs.length; i++) {
-                    var av = avs[i];
-                    var bv = avToBv(av);
-                    if (!bv) {
-                        console.info('[fav-fix/xbeibeix] av', av, 'avToBv failed, skip');
-                        continue;
-                    }
-                    var url = 'https://xbeibeix.com/video/' + bv;
-                    var r;
-                    try { r = await gmGet(url, { raw: true, timeout: REQ_TIMEOUT }); }
-                    catch (e) {
-                        console.warn('[fav-fix/xbeibeix] av', av, 'network error:', e.message);
-                        continue;
-                    }
-                    if (!r || !r.body) continue;
-                    sawAnyResponse = true;
-                    // Server-side redirect to landing means the av isn't there.
-                    if (r.finalUrl && !/\/video\//.test(r.finalUrl)) {
-                        console.info('[fav-fix/xbeibeix] av', av, 'redirected (no record)');
-                        continue;
-                    }
-                    var doc;
-                    try { doc = new DOMParser().parseFromString(r.body, 'text/html'); }
-                    catch (e) { continue; }
-                    if (doc.querySelector('meta[name="robots"]')) {
-                        console.warn('[fav-fix/xbeibeix] av', av, 'CAPTCHA — visit https://xbeibeix.com/video/' + bv + ' once to clear');
-                        continue;
-                    }
-                    var titleEl = doc.querySelector('.fw-bold');
-                    var imgEl   = doc.querySelector('img.img-thumbnail');
-                    var authorEl = doc.querySelector('input');
-                    var title = titleEl && titleEl.textContent && titleEl.textContent.trim();
-                    var cover = imgEl && imgEl.getAttribute('src');
-                    var author = authorEl && authorEl.getAttribute('value');
-                    if (!title && !cover) continue;
-                    // cerenkov: covers not under /bfs/archive/ are likely stale.
-                    // We still keep them (better than placeholder) but mark
-                    // quality lower implicitly via QUALITY.cover.
-                    out.set(String(av), {
-                        oid:   Number(av),
-                        title: title || undefined,
-                        cover: cover || undefined,
-                        upper: author ? { name: author } : undefined
-                    });
-                }
-                // Backoff: any HTTP-level response means the site is up
-                // even if the av wasn't archived. Only flag failure if
-                // every single request errored.
-                if (sawAnyResponse) sourceFailureGate.onOk('xbeibeix');
-                else sourceFailureGate.onFail('xbeibeix', 'all requests errored');
-                console.info('[fav-fix/xbeibeix] total:', out.size, '/', avs.length);
-                return out;
-            }
-        },
         jijidown: {
             name: 'jijidown',
             paginated: false,
@@ -839,18 +762,43 @@
                 var out = new Map();
                 // Per-av timeout 5s — see biliplus comment above.
                 var REQ_TIMEOUT = 5000;
+                // get_info is two-phase: the FIRST hit for an aid jijidown
+                // hasn't warmed returns a loading stub
+                // ({code:0, msg:'loading', title:'正在加载数据...'} with NO
+                // upid); the real record only lands a second or two later. A
+                // single shot therefore drops every cold aid (upid undefined →
+                // "no record"), which is most invalid items — the exact case
+                // this source exists for. Re-poll the stub a few times before
+                // giving up. The phase-2 budget in resolveItems still caps
+                // total wall time, so a folder full of cold aids can't stall
+                // the DOM patch.
+                var LOADING_POLL_MS   = 1200;
+                var LOADING_MAX_POLLS = 2;        // 1 initial request + 2 re-polls
                 var sawAnyResponse = false;
                 for (var i = 0; i < avs.length; i++) {
                     var av = avs[i];
                     var url = 'https://www.jijidown.com/api/v1/video/get_info?id=' + av;
-                    var r;
-                    try { r = await gmGet(url, { timeout: REQ_TIMEOUT }); }
-                    catch (e) {
-                        console.warn('[fav-fix/jijidown] av', av, 'network error:', e.message);
-                        continue;
+                    var r = null;
+                    for (var attempt = 0; attempt <= LOADING_MAX_POLLS; attempt++) {
+                        try { r = await gmGet(url, { timeout: REQ_TIMEOUT }); }
+                        catch (e) {
+                            console.warn('[fav-fix/jijidown] av', av, 'network error:', e.message);
+                            r = null;
+                            break;
+                        }
+                        sawAnyResponse = true;
+                        if (r && (r.msg === 'loading' || r.title === '正在加载数据...')) {
+                            if (attempt < LOADING_MAX_POLLS) {
+                                await new Promise(function (res) { setTimeout(res, LOADING_POLL_MS); });
+                                continue;        // still warming up — re-poll
+                            }
+                            console.info('[fav-fix/jijidown] av', av, 'still loading after',
+                                         LOADING_MAX_POLLS + 1, 'polls, skip');
+                            r = null;
+                        }
+                        break;
                     }
                     if (!r) continue;
-                    sawAnyResponse = true;
                     if (!r.upid || r.upid <= 0) {
                         console.info('[fav-fix/jijidown] av', av, 'no record (upid=' + r.upid + ')');
                         continue;
@@ -930,17 +878,14 @@
     };
 
     // Priority order: source name LEFT wins if its value passes QUALITY.
-    // 3rd-party archives (biliplus / xbeibeix / jijidown) carry only
-    // title/cover/upper.name — they're the last-resort fallback for items
-    // even the Android-app snapshot couldn't save.
+    // 3rd-party archives (biliplus / jijidown) carry only title/cover/
+    // upper.name — they're the last-resort fallback for items even the
+    // Android-app snapshot couldn't save.
     var FIELD_PRIORITY = {
         // Android endpoint preserves invalid-item snapshots for these.
-        // xbeibeix is ordered last among 3rd-party because its cover URLs
-        // are often the same hdslb CDN ones already gone — cerenkov notes
-        // "极大概率是失效的旧图片链接" when not in /bfs/archive/ path.
-        cover:    ['android', 'public', 'biliplus', 'jijidown', 'xbeibeix'],
-        title:    ['android', 'public', 'biliplus', 'jijidown', 'xbeibeix'],
-        upper:    ['android', 'public', 'biliplus', 'jijidown', 'xbeibeix'],
+        cover:    ['android', 'public', 'biliplus', 'jijidown'],
+        title:    ['android', 'public', 'biliplus', 'jijidown'],
+        upper:    ['android', 'public', 'biliplus', 'jijidown'],
         intro:    ['android', 'public'],
         duration: ['android', 'public'],
         playback_desc: ['android', 'public'],
@@ -1179,7 +1124,7 @@
         // Phase 2 (3rd-party) still runs synchronously below so first paint has
         // a best-available cover.
 
-        // ─── Phase 2: per-av sources (biliplus, xbeibeix, jijidown) ───
+        // ─── Phase 2: per-av sources (biliplus, jijidown) ────────────
         // Only query 3rd-party archives for avs whose cover OR title is
         // still bad after phase 1. Skip entirely if everything is satisfied.
         // attemptedPerAv already tracks phase 1; phase 2 adds 3rd-party
@@ -1715,7 +1660,7 @@
 
     // ─── Hover tooltip (rich) ───────────────────────────────────────────
 
-    // Third-party archives (xbeibeix HTML scrape, biliplus, jijidown) are an
+    // Third-party archives (biliplus, jijidown) are an
     // untrusted boundary: a poisoned/compromised source could return a
     // cover/avatar URL of `javascript:…` or `data:text/html,…`. Setting such
     // a value as img.src is inert (browsers never execute it), but handing it
@@ -1804,7 +1749,6 @@
         android:   '#5b8def',
         'public':  '#67c23a',
         biliplus:  '#e6a23c',
-        xbeibeix:  '#9b59b6',
         jijidown:  '#f56c6c'
     };
     function srcTag(src) {

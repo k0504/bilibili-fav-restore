@@ -37,15 +37,6 @@
                 timeout: timeoutMs,
                 onload: function (resp) {
                     var text = resp.responseText;
-                    if (opts.raw) {
-                        // Raw mode: caller wants the response body verbatim
-                        // (HTML scraping / non-JSON sources like xbeibeix).
-                        // Also surface the final URL so callers can detect
-                        // server-side redirects (e.g. xbeibeix bouncing back
-                        // to its landing page when an av isn't archived).
-                        resolve({ status: resp.status, body: text, finalUrl: resp.finalUrl || url });
-                        return;
-                    }
                     // Some responses arrive with no text body — an empty 204,
                     // an opaque/blocked response, or a GM build that leaves
                     // responseText undefined for certain statuses. Guard
