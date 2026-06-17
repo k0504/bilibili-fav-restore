@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.9.1
+// @version      0.9.2
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.9.1)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.9.2)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.9.1';
+    var CORE_VERSION = '0.9.2';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -1300,6 +1300,12 @@
     //     under us, which is fine — we re-check before each page, walk, and
     //     backoff slice.
     var _flapBgRunning = false;
+    // Live progress of the active flap loop, surfaced to the pending card's
+    // hover tooltip (buildTipHtml _pending branch) so the user can SEE what the
+    // background retry is doing — which walk, how many left, walking vs backing-
+    // off, countdown to the next sample — instead of a static "重试中". null
+    // whenever no loop runs (set on entry below, cleared in the finally).
+    var _flapProgress = null;
     // Avs the loop GAVE UP on (still pending after it stopped), kept so a card's
     // "立即重试" menu item (kickManualRetry) can re-arm the loop with the WHOLE
     // leftover set in one walk instead of chasing a single av. Scoped to one
@@ -1318,6 +1324,12 @@
         var pending = new Set(candidates.map(String));
         var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
         var walk = 0, dry = 0;
+        _flapProgress = {
+            mediaId: mediaId, startedAt: Date.now(), deadline: deadline,
+            total: pending.size, remaining: pending.size,
+            walk: 0, dry: 0, maxDry: FLAP_MAX_DRY,
+            phase: 'walking', page: 0, nextWalkAt: 0, lastRecovered: 0
+        };
         try {
             log('flap-bg: start', pending.size, 'candidate(s):',
                 Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
@@ -1325,6 +1337,9 @@
                 if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
                 if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); break; }
                 walk++;
+                _flapProgress.walk = walk;
+                _flapProgress.phase = 'walking';
+                _flapProgress.remaining = pending.size;
 
                 // One fresh android walk straight into pageItems.
                 var pn = 1;
@@ -1333,6 +1348,7 @@
                     var allFound = true;
                     pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
                     if (allFound) break;
+                    _flapProgress.page = pn;
                     var page;
                     try { page = await SOURCES.android.fetchPage({ mediaId: mediaId, pn: pn }); }
                     catch (e) { warn('flap-bg walk ' + walk + ' pn ' + pn + ' failed:', e.message); break; }
@@ -1371,6 +1387,9 @@
                     dry++;     // no progress → widen the gap, step toward giving up
                     log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
                 }
+                _flapProgress.dry = dry;
+                _flapProgress.lastRecovered = recovered.length;
+                _flapProgress.remaining = pending.size;
 
                 if (!pending.size || dry >= FLAP_MAX_DRY) break;
 
@@ -1379,6 +1398,8 @@
                 // out within a second (frees _flapBgRunning for the next folder).
                 var gap = FLAP_BACKOFF_MS[Math.min(dry, FLAP_BACKOFF_MS.length - 1)];
                 var until = Date.now() + gap;
+                _flapProgress.phase = 'sleeping';
+                _flapProgress.nextWalkAt = until;
                 while (Date.now() < until) {
                     if (detectMediaId() !== mediaId || Date.now() > deadline) break;
                     await new Promise(function (r) { setTimeout(r, Math.min(1000, until - Date.now())); });
@@ -1388,6 +1409,7 @@
                 'still unrecovered (stays 待重试 until a fresh reload re-attempts)');
         } finally {
             _flapBgRunning = false;
+            _flapProgress = null;
             // Remember the avs we gave up on so a card's "立即重试" can re-arm
             // the loop over the WHOLE leftover set (not just the clicked card).
             // If the loop recovered everything, pending is empty → no leftover →
@@ -1701,6 +1723,15 @@
         return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     }
 
+    // Elapsed wall time for the pending-card live status ("已用时 …"). Takes a
+    // millisecond delta (Date.now() - startedAt), NOT a unix ts like fmtTime.
+    function fmtElapsed(ms) {
+        var s = Math.max(0, Math.floor(ms / 1000));
+        var m = Math.floor(s / 60);
+        s = s % 60;
+        return m > 0 ? (m + ' 分 ' + s + ' 秒') : (s + ' 秒');
+    }
+
     // Single source of truth for "投稿时间" so the hover tooltip and the
     // "复制完整信息" clipboard text never diverge (AGENTS.md gotcha #83).
     // Both must read the SAME field-fallback chain and the SAME source tag,
@@ -1715,6 +1746,14 @@
 
     // Single global tooltip element, reused across all hovers.
     var _tipEl = null;
+    // While hovering a pending (重试中) card, the tooltip is rebuilt once a
+    // second so its live status (countdown / elapsed / round) actually ticks —
+    // visible proof the loop is not stuck. One timer at a time; cleared on hide
+    // and when the card stops being pending.
+    var _tipRefreshTimer = null;
+    function stopTipRefresh() {
+        if (_tipRefreshTimer) { clearInterval(_tipRefreshTimer); _tipRefreshTimer = null; }
+    }
     function getTip() {
         if (_tipEl) return _tipEl;
         _tipEl = document.createElement('div');
@@ -1800,6 +1839,31 @@
             var pbv = real.bvid || (pav ? avToBv(pav) : null);
             var pActive = _flapBgRunning;
             var pHead = pActive ? '正在找回此视频快照…' : '暂未找回，等待重试';
+
+            // Live status block: only while the loop is actually running AND its
+            // progress belongs to THIS folder (the loop nulls _flapProgress on
+            // exit / folder switch). Answers "why still 重试中 / what is it doing"
+            // with the real loop state. showTip re-renders this once a second so
+            // the countdown and elapsed time tick visibly (proof it isn't stuck).
+            var liveHtml = '';
+            var prog = _flapProgress;
+            if (pActive && prog && prog.mediaId === detectMediaId()) {
+                var stateLine;
+                if (prog.phase === 'sleeping') {
+                    var secs = Math.max(0, Math.ceil((prog.nextWalkAt - Date.now()) / 1000));
+                    stateLine = '当前：等待下次采样（约 ' + secs + ' 秒后）';
+                } else {
+                    stateLine = '当前：正在重新采样（第 ' + (prog.page || 1) + ' 页）';
+                }
+                liveHtml = '<div style="margin-top:6px;padding:6px 8px;border-radius:6px;'
+                         + 'background:rgba(255,255,255,.06);color:#cfcfd6;font-size:11px;line-height:1.7">'
+                         + '已采样 ' + prog.walk + ' 轮 · 整夹还剩 ' + prog.remaining + ' 项待找回<br>'
+                         + esc(stateLine) + '<br>'
+                         + '已用时 ' + fmtElapsed(Date.now() - prog.startedAt)
+                         + ' · 连续 ' + prog.dry + '/' + prog.maxDry + ' 轮无新增即停'
+                         + '</div>';
+            }
+
             var pBody = pActive
                 ? 'bilibili 的 android 收藏接口会随机漏掉一部分失效视频，脚本正在后台多次重新采样把它捞回来。找回后本卡片会自动更新封面与标题，无需手动操作。'
                 : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。';
@@ -1808,6 +1872,7 @@
                  + esc(pHead) + '</div>'
                  + (pav ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">AV ' + codeTag('av' + pav) + '</div>' : '')
                  + (pbv ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">BV ' + codeTag(pbv) + '</div>' : '')
+                 + liveHtml
                  + '<div style="margin-top:6px;color:#bdbdc2;font-size:11px;line-height:1.55">'
                  + esc(pBody) + '</div>'
                  + '<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#666;font-size:10px">'
@@ -1919,6 +1984,7 @@
 
     function showTip(el, real, evt) {
         var tip = getTip();
+        stopTipRefresh();
         tip.innerHTML = buildTipHtml(real);
         tip.style.display = 'block';
         // Position: prefer above the element, centered horizontally;
@@ -1935,9 +2001,24 @@
         tip.style.top = top + 'px';
         // rAF so the opacity transition actually animates from 0 → 1.
         requestAnimationFrame(function () { tip.style.opacity = '1'; });
+
+        // Pending card: keep the live status fresh while hovering. Re-read the
+        // element's CURRENT real each tick (el.__favFixReal) so that if the flap
+        // loop recovers this card mid-hover, the tooltip upgrades to the normal
+        // rich layout and the refresh stops on its own. Position is left as set
+        // (content height barely changes between ticks).
+        if (real && real._pending) {
+            _tipRefreshTimer = setInterval(function () {
+                if (tip.style.display === 'none') { stopTipRefresh(); return; }
+                var liveReal = (el && el.__favFixReal) || real;
+                tip.innerHTML = buildTipHtml(liveReal);
+                if (!liveReal._pending) stopTipRefresh();
+            }, 1000);
+        }
     }
     function hideTip() {
         var tip = getTip();
+        stopTipRefresh();
         tip.style.opacity = '0';
         setTimeout(function () {
             if (tip.style.opacity === '0') tip.style.display = 'none';

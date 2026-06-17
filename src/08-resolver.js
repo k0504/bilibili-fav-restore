@@ -293,6 +293,12 @@
     //     under us, which is fine — we re-check before each page, walk, and
     //     backoff slice.
     var _flapBgRunning = false;
+    // Live progress of the active flap loop, surfaced to the pending card's
+    // hover tooltip (buildTipHtml _pending branch) so the user can SEE what the
+    // background retry is doing — which walk, how many left, walking vs backing-
+    // off, countdown to the next sample — instead of a static "重试中". null
+    // whenever no loop runs (set on entry below, cleared in the finally).
+    var _flapProgress = null;
     // Avs the loop GAVE UP on (still pending after it stopped), kept so a card's
     // "立即重试" menu item (kickManualRetry) can re-arm the loop with the WHOLE
     // leftover set in one walk instead of chasing a single av. Scoped to one
@@ -311,6 +317,12 @@
         var pending = new Set(candidates.map(String));
         var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
         var walk = 0, dry = 0;
+        _flapProgress = {
+            mediaId: mediaId, startedAt: Date.now(), deadline: deadline,
+            total: pending.size, remaining: pending.size,
+            walk: 0, dry: 0, maxDry: FLAP_MAX_DRY,
+            phase: 'walking', page: 0, nextWalkAt: 0, lastRecovered: 0
+        };
         try {
             log('flap-bg: start', pending.size, 'candidate(s):',
                 Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
@@ -318,6 +330,9 @@
                 if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
                 if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); break; }
                 walk++;
+                _flapProgress.walk = walk;
+                _flapProgress.phase = 'walking';
+                _flapProgress.remaining = pending.size;
 
                 // One fresh android walk straight into pageItems.
                 var pn = 1;
@@ -326,6 +341,7 @@
                     var allFound = true;
                     pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
                     if (allFound) break;
+                    _flapProgress.page = pn;
                     var page;
                     try { page = await SOURCES.android.fetchPage({ mediaId: mediaId, pn: pn }); }
                     catch (e) { warn('flap-bg walk ' + walk + ' pn ' + pn + ' failed:', e.message); break; }
@@ -364,6 +380,9 @@
                     dry++;     // no progress → widen the gap, step toward giving up
                     log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
                 }
+                _flapProgress.dry = dry;
+                _flapProgress.lastRecovered = recovered.length;
+                _flapProgress.remaining = pending.size;
 
                 if (!pending.size || dry >= FLAP_MAX_DRY) break;
 
@@ -372,6 +391,8 @@
                 // out within a second (frees _flapBgRunning for the next folder).
                 var gap = FLAP_BACKOFF_MS[Math.min(dry, FLAP_BACKOFF_MS.length - 1)];
                 var until = Date.now() + gap;
+                _flapProgress.phase = 'sleeping';
+                _flapProgress.nextWalkAt = until;
                 while (Date.now() < until) {
                     if (detectMediaId() !== mediaId || Date.now() > deadline) break;
                     await new Promise(function (r) { setTimeout(r, Math.min(1000, until - Date.now())); });
@@ -381,6 +402,7 @@
                 'still unrecovered (stays 待重试 until a fresh reload re-attempts)');
         } finally {
             _flapBgRunning = false;
+            _flapProgress = null;
             // Remember the avs we gave up on so a card's "立即重试" can re-arm
             // the loop over the WHOLE leftover set (not just the clicked card).
             // If the loop recovered everything, pending is empty → no leftover →

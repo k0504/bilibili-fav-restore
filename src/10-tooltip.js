@@ -41,6 +41,15 @@
         return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     }
 
+    // Elapsed wall time for the pending-card live status ("已用时 …"). Takes a
+    // millisecond delta (Date.now() - startedAt), NOT a unix ts like fmtTime.
+    function fmtElapsed(ms) {
+        var s = Math.max(0, Math.floor(ms / 1000));
+        var m = Math.floor(s / 60);
+        s = s % 60;
+        return m > 0 ? (m + ' 分 ' + s + ' 秒') : (s + ' 秒');
+    }
+
     // Single source of truth for "投稿时间" so the hover tooltip and the
     // "复制完整信息" clipboard text never diverge (AGENTS.md gotcha #83).
     // Both must read the SAME field-fallback chain and the SAME source tag,
@@ -55,6 +64,14 @@
 
     // Single global tooltip element, reused across all hovers.
     var _tipEl = null;
+    // While hovering a pending (重试中) card, the tooltip is rebuilt once a
+    // second so its live status (countdown / elapsed / round) actually ticks —
+    // visible proof the loop is not stuck. One timer at a time; cleared on hide
+    // and when the card stops being pending.
+    var _tipRefreshTimer = null;
+    function stopTipRefresh() {
+        if (_tipRefreshTimer) { clearInterval(_tipRefreshTimer); _tipRefreshTimer = null; }
+    }
     function getTip() {
         if (_tipEl) return _tipEl;
         _tipEl = document.createElement('div');
@@ -140,6 +157,31 @@
             var pbv = real.bvid || (pav ? avToBv(pav) : null);
             var pActive = _flapBgRunning;
             var pHead = pActive ? '正在找回此视频快照…' : '暂未找回，等待重试';
+
+            // Live status block: only while the loop is actually running AND its
+            // progress belongs to THIS folder (the loop nulls _flapProgress on
+            // exit / folder switch). Answers "why still 重试中 / what is it doing"
+            // with the real loop state. showTip re-renders this once a second so
+            // the countdown and elapsed time tick visibly (proof it isn't stuck).
+            var liveHtml = '';
+            var prog = _flapProgress;
+            if (pActive && prog && prog.mediaId === detectMediaId()) {
+                var stateLine;
+                if (prog.phase === 'sleeping') {
+                    var secs = Math.max(0, Math.ceil((prog.nextWalkAt - Date.now()) / 1000));
+                    stateLine = '当前：等待下次采样（约 ' + secs + ' 秒后）';
+                } else {
+                    stateLine = '当前：正在重新采样（第 ' + (prog.page || 1) + ' 页）';
+                }
+                liveHtml = '<div style="margin-top:6px;padding:6px 8px;border-radius:6px;'
+                         + 'background:rgba(255,255,255,.06);color:#cfcfd6;font-size:11px;line-height:1.7">'
+                         + '已采样 ' + prog.walk + ' 轮 · 整夹还剩 ' + prog.remaining + ' 项待找回<br>'
+                         + esc(stateLine) + '<br>'
+                         + '已用时 ' + fmtElapsed(Date.now() - prog.startedAt)
+                         + ' · 连续 ' + prog.dry + '/' + prog.maxDry + ' 轮无新增即停'
+                         + '</div>';
+            }
+
             var pBody = pActive
                 ? 'bilibili 的 android 收藏接口会随机漏掉一部分失效视频，脚本正在后台多次重新采样把它捞回来。找回后本卡片会自动更新封面与标题，无需手动操作。'
                 : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。';
@@ -148,6 +190,7 @@
                  + esc(pHead) + '</div>'
                  + (pav ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">AV ' + codeTag('av' + pav) + '</div>' : '')
                  + (pbv ? '<div style="font-size:11px;color:#bdbdc2;margin-bottom:4px">BV ' + codeTag(pbv) + '</div>' : '')
+                 + liveHtml
                  + '<div style="margin-top:6px;color:#bdbdc2;font-size:11px;line-height:1.55">'
                  + esc(pBody) + '</div>'
                  + '<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#666;font-size:10px">'
@@ -259,6 +302,7 @@
 
     function showTip(el, real, evt) {
         var tip = getTip();
+        stopTipRefresh();
         tip.innerHTML = buildTipHtml(real);
         tip.style.display = 'block';
         // Position: prefer above the element, centered horizontally;
@@ -275,9 +319,24 @@
         tip.style.top = top + 'px';
         // rAF so the opacity transition actually animates from 0 → 1.
         requestAnimationFrame(function () { tip.style.opacity = '1'; });
+
+        // Pending card: keep the live status fresh while hovering. Re-read the
+        // element's CURRENT real each tick (el.__favFixReal) so that if the flap
+        // loop recovers this card mid-hover, the tooltip upgrades to the normal
+        // rich layout and the refresh stops on its own. Position is left as set
+        // (content height barely changes between ticks).
+        if (real && real._pending) {
+            _tipRefreshTimer = setInterval(function () {
+                if (tip.style.display === 'none') { stopTipRefresh(); return; }
+                var liveReal = (el && el.__favFixReal) || real;
+                tip.innerHTML = buildTipHtml(liveReal);
+                if (!liveReal._pending) stopTipRefresh();
+            }, 1000);
+        }
     }
     function hideTip() {
         var tip = getTip();
+        stopTipRefresh();
         tip.style.opacity = '0';
         setTimeout(function () {
             if (tip.style.opacity === '0') tip.style.display = 'none';
