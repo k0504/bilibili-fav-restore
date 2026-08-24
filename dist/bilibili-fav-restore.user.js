@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.11.1
+// @version      0.11.2
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.1)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.2)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.11.1';
+    var CORE_VERSION = '0.11.2';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -4247,14 +4247,16 @@
                 upperName:   (rec.upper && rec.upper.name) || '',
                 media_ids:   Array.isArray(rec.media_ids) ? rec.media_ids.slice() : [],
                 backed_at:   rec.backed_at || 0,
+                fav_time:    rec.fav_time || 0,   // unix SECONDS (backed_at is ms)
                 cover_size:  rec.cover_size || 0,
                 data_source: rec.data_source || '',
                 hasCover:    !!rec.cover_blob
             });
         }).then(function () {
-            // Newest first: a manual prune almost always targets what a recent
-            // run just wrote, and backed_at is the only ordering the store has.
-            out.sort(function (a, b) { return (b.backed_at || 0) - (a.backed_at || 0); });
+            // No sort here: ordering is a VIEW concern (mgrApplyFilter), driven
+            // by the sort dropdown. Note backed_at is NOT the folder's natural
+            // order — a first full walk writes page 1 (newest favorites) first,
+            // so "newest backed_at" lists the OLDEST favorites on top.
             return out;
         });
     }
@@ -4322,6 +4324,15 @@
             return r.title.toLowerCase().indexOf(q) >= 0
                 || r.bvid.toLowerCase().indexOf(q) >= 0
                 || r.upperName.toLowerCase().indexOf(q) >= 0;
+        });
+        // Sort the view. Default fav_desc mirrors the favlist page's own
+        // 最近收藏 order; records missing the key (0) sink to the end in desc.
+        var byBacked = s.sort.indexOf('backed') === 0;
+        var asc = s.sort.slice(-3) === 'asc';
+        s.filtered.sort(function (a, b) {
+            var av2 = byBacked ? a.backed_at : a.fav_time;
+            var bv2 = byBacked ? b.backed_at : b.fav_time;
+            return asc ? av2 - bv2 : bv2 - av2;
         });
         s.page = 1;
     }
@@ -4415,9 +4426,14 @@
             row.className = 'fav-fix-mgr-row';
             var tagCls = r.data_source === 'merged' ? ' fav-fix-mgr-tag-merged' : '';
             var tagTxt = r.data_source === 'merged' ? '取自还原缓存' : '备份时有效';
+            // The visible date follows the active sort key, labeled so a list
+            // sorted by 收藏时间 does not show seemingly shuffled backup dates.
+            var dateStr = s.sort.indexOf('backed') === 0
+                ? '备份于 ' + mgrDate(r.backed_at)
+                : '收藏于 ' + (r.fav_time ? mgrDate(r.fav_time * 1000) : '未知');
             var sub = [
                 r.upperName || '未知 UP 主',
-                mgrDate(r.backed_at),
+                dateStr,
                 r.cover_size ? fmtBytes(r.cover_size) : '无封面',
                 r.bvid || ('av' + r.av)
             ].join(' · ');
@@ -4657,6 +4673,12 @@
                 +   '<div class="fav-fix-mgr-tools">'
                 +     '<input class="fav-fix-mgr-input" type="text" placeholder="搜索标题 / BV 号 / UP 主">'
                 +     '<select class="fav-fix-mgr-select"><option value="*">全部收藏夹</option></select>'
+                +     '<select class="fav-fix-mgr-select fav-fix-mgr-sort">'
+                +       '<option value="fav_desc">最新收藏在前</option>'
+                +       '<option value="fav_asc">最早收藏在前</option>'
+                +       '<option value="backed_desc">最新备份在前</option>'
+                +       '<option value="backed_asc">最早备份在前</option>'
+                +     '</select>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-backup">备份当前收藏夹</button>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
                 +   '</div>'
@@ -4674,6 +4696,7 @@
 
             _mgrState = {
                 index: [], filtered: [], page: 1, query: '', folder: '*',
+                sort: 'fav_desc',
                 names: new Map(),
                 currentMid: detectMediaId(),
                 urls: [], renderToken: 0, busy: false, backupBusy: false,
@@ -4684,6 +4707,7 @@
                     body:     host.querySelector('.fav-fix-mgr-body'),
                     search:   host.querySelector('.fav-fix-mgr-input'),
                     folder:   host.querySelector('.fav-fix-mgr-select'),
+                    sort:     host.querySelector('.fav-fix-mgr-sort'),
                     backup:   host.querySelector('.fav-fix-mgr-backup'),
                     bulk:     host.querySelector('.fav-fix-mgr-bulk'),
                     prev:     host.querySelector('.fav-fix-mgr-prev'),
@@ -4723,6 +4747,12 @@
             s.els.folder.addEventListener('change', function () {
                 if (s.busy) { s.els.folder.value = s.folder; return; }
                 s.folder = s.els.folder.value;
+                mgrApplyFilter();
+                mgrRenderList();
+            });
+            s.els.sort.addEventListener('change', function () {
+                if (s.busy) { s.els.sort.value = s.sort; return; }
+                s.sort = s.els.sort.value;
                 mgrApplyFilter();
                 mgrRenderList();
             });
