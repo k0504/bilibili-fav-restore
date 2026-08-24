@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.9.2
+// @version      0.10.0
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.9.2)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.10.0)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.9.2';
+    var CORE_VERSION = '0.10.0';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -380,6 +380,56 @@
         // catch the pathological stall case. Clear the guard once the race
         // settles so a successful request doesn't leave a live timer pending
         // for timeoutMs+500 (every call would otherwise leak one).
+        var guardTimer = null;
+        var guard = new Promise(function (_, rej) {
+            guardTimer = setTimeout(function () {
+                rej(new Error('client-side timeout (' + timeoutMs + 'ms+500): ' + url));
+            }, timeoutMs + 500);
+        });
+        return Promise.race([underlying, guard]).finally(function () {
+            if (guardTimer) clearTimeout(guardTimer);
+        });
+    }
+
+    // Binary sibling of gmGet, for the manual backup (15a-backup.js): pulls a
+    // cover image straight into a Blob so it can be stored in IndexedDB. Kept
+    // as a separate function rather than a flag on gmGet because gmGet's whole
+    // contract is "resolves to parsed JSON" and every caller depends on it.
+    // Same client-side Promise.race guard, same reason (GM's own `timeout`
+    // never fires on a connection that stalls mid-handshake).
+    function gmGetBlob(url, opts) {
+        opts = opts || {};
+        var timeoutMs = opts.timeout || 10000;
+        var underlying = new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                responseType: 'blob',
+                // hdslb serves covers without a Referer check today, but send
+                // one anyway — a hotlink guard would otherwise turn every
+                // backup into "封面失败 N".
+                headers: opts.headers || { 'Referer': 'https://www.bilibili.com/' },
+                timeout: timeoutMs,
+                onload: function (resp) {
+                    if (resp.status && (resp.status < 200 || resp.status >= 300)) {
+                        reject(new Error('HTTP ' + resp.status + ': ' + url));
+                        return;
+                    }
+                    var b = resp.response;
+                    // Duck-typed, NOT `instanceof Blob`: the Blob is minted in
+                    // the GM sandbox realm, whose Blob constructor is not
+                    // necessarily the one visible here — instanceof can be
+                    // false for a perfectly good Blob.
+                    if (!b || typeof b.size !== 'number' || !b.size) {
+                        reject(new Error('empty/non-blob response (status=' + resp.status + '): ' + url));
+                        return;
+                    }
+                    resolve(b);
+                },
+                onerror: function () { reject(new Error('network error: ' + url)); },
+                ontimeout: function () { reject(new Error('timeout: ' + url)); }
+            });
+        });
         var guardTimer = null;
         var guard = new Promise(function (_, rej) {
             guardTimer = setTimeout(function () {
@@ -878,28 +928,33 @@
     };
 
     // Priority order: source name LEFT wins if its value passes QUALITY.
+    // `backup` (15a-backup.js) leads every field it supplies: it is the only
+    // source captured while the video was still ALIVE, so its snapshot beats
+    // any post-mortem one by construction. It is absent from attr / link /
+    // playback_desc on purpose — those describe the item's CURRENT state and
+    // must come from a live source.
     // 3rd-party archives (biliplus / jijidown) carry only title/cover/
     // upper.name — they're the last-resort fallback for items even the
     // Android-app snapshot couldn't save.
     var FIELD_PRIORITY = {
         // Android endpoint preserves invalid-item snapshots for these.
-        cover:    ['android', 'public', 'biliplus', 'jijidown'],
-        title:    ['android', 'public', 'biliplus', 'jijidown'],
-        upper:    ['android', 'public', 'biliplus', 'jijidown'],
-        intro:    ['android', 'public'],
-        duration: ['android', 'public'],
+        cover:    ['backup', 'android', 'public', 'biliplus', 'jijidown'],
+        title:    ['backup', 'android', 'public', 'biliplus', 'jijidown'],
+        upper:    ['backup', 'android', 'public', 'biliplus', 'jijidown'],
+        intro:    ['backup', 'android', 'public'],
+        duration: ['backup', 'android', 'public'],
         playback_desc: ['android', 'public'],
         attr:     ['android', 'public'],
         link:     ['android', 'public'],
-        bvid:     ['public', 'android'],
+        bvid:     ['backup', 'public', 'android'],
         // Public endpoint has these; Android omits them for invalid items:
-        cnt_info: ['public',  'android'],
-        pubtime:  ['public'],
-        ctime:    ['public',  'android'],
-        fav_time: ['public'],
-        tid:      ['public'],
-        pages:    ['public'],
-        page:     ['public',  'android']
+        cnt_info: ['backup', 'public',  'android'],
+        pubtime:  ['backup', 'public'],
+        ctime:    ['backup', 'public',  'android'],
+        fav_time: ['backup', 'public'],
+        tid:      ['backup', 'public'],
+        pages:    ['backup', 'public'],
+        page:     ['backup', 'public',  'android']
     };
 
     function mergeBySource(perSource) {
@@ -954,7 +1009,7 @@
     //   - changing the merged-item shape (renaming fields etc.)
 
     var CACHE_PREFIX  = 'item:av';
-    var CACHE_VERSION = 5;   // bumped: +_degenerate flag (short TTL on no-cover-no-title merges)
+    var CACHE_VERSION = 6;   // bumped: +SOURCES.backup (IndexedDB snapshots lead FIELD_PRIORITY)
     var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
     // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
     // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
@@ -975,14 +1030,21 @@
             return null;
         }
         // Short TTL for any NOT-confidently-recovered entry:
-        //   _degenerate — some source returned only placeholders, or
-        //   _pending    — android may still flap the real snapshot back in
-        //                 (see runFlapRecovery in 08-resolver.js).
+        //   _degenerate    — some source returned only placeholders, or
+        //   _pending       — android may still flap the real snapshot back in
+        //                    (see runFlapRecovery in 08-resolver.js), or
+        //   _cover_pending — the title was recovered but the cover is still a
+        //                    placeholder; the card is patched, yet the flap
+        //                    loop is still chasing the image. Long-TTL locking
+        //                    here is what a title-only LOCAL BACKUP record
+        //                    (which never expires) would otherwise impose on
+        //                    every future resolve of that av.
         // Locking these for 30 days would turn a transient android walk-to-walk
         // drop into a permanent "deleted" (observed: a war-footage folder where
         // android returned 58/89 on one walk and the dropped items all fell to
         // _no_source). Only a confidently-recovered merge gets the long TTL.
-        var ttl = (v._degenerate || v._pending) ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+        var ttl = (v._degenerate || v._pending || v._cover_pending)
+                ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
@@ -992,6 +1054,10 @@
         try { GM_setValue(CACHE_PREFIX + av, merged); }
         catch (e) { warn('saveCache failed for av', av, e); }
     }
+    // Note for anyone extending the clearing paths below: they clear DERIVED
+    // data (re-fetchable merges) only. The IndexedDB backup store
+    // (15a-backup.js) is user-authored data with no upstream to re-fetch from
+    // and must NEVER be dropped here.
     function clearItemCache(av) { GM_deleteValue(CACHE_PREFIX + av); }
     function clearAllItemCache() {
         if (typeof GM_listValues !== 'function') {
@@ -1085,6 +1151,28 @@
             attemptedPerAv.get(av).add(src);
         }
 
+        // ─── Phase 0: local backup (IndexedDB) ───────────────────────
+        // The manual backup (15a-backup.js) is the only source that captured
+        // the item while it was still ALIVE, so it runs before anything on the
+        // network and leads FIELD_PRIORITY. A hit here cascades: the av passes
+        // hasGoodCoverAndTitle, so phase 2 never spends budget on third-party
+        // archives for it, and the merge is neither _degenerate nor _pending,
+        // so the background flap loop never chases it. Every todoAv is marked
+        // attempted — a miss is a real "已查询但无记录" answer, exactly like a
+        // paginated source whose page didn't list the av. A broken or blocked
+        // IDB must never take the resolver down: warn and fall through to the
+        // network sources.
+        if (SOURCES.backup && SOURCES.backup.enabled()) {
+            todoAvs.forEach(function (av) { markAttempted(av, 'backup'); });
+            try {
+                var backupHits = await SOURCES.backup.fetchAvs(todoAvs);
+                backupHits.forEach(function (item, av) { pageItems.set('backup|' + av, item); });
+                if (backupHits.size) log('phase 0: backup covered', backupHits.size, 'of', todoAvs.length);
+            } catch (e) {
+                warn('phase 0 backup lookup failed:', e && e.message);
+            }
+        }
+
         // ─── Phase 1: paginated sources (android, public) ────────────
         // Walk pages of each enabled paginated source until every todoAv
         // appears or we hit MAX_PN. Page Promises are deduped by ensurePage.
@@ -1140,6 +1228,7 @@
             var src = srcOrder[s];
             var def = SOURCES[src];
             if (def.paginated)   continue;
+            if (src === 'backup') continue;   // local, already queried in phase 0
             if (!def.enabled()) {
                 // Most commonly this means the source is in the backoff
                 // window (sourceFailureGate.isOpen returned false). Loud
@@ -1220,6 +1309,18 @@
                 // Degenerate (placeholders only) but android could still recover
                 // it on a later walk → keep retriable instead of stuck.
                 if (rec._degenerate && androidUp) rec._pending = true;
+                // Title recovered, cover still missing / a placeholder. NOT
+                // _pending — the title is real and belongs on the card right
+                // now — but not settled either: android flaps covers exactly as
+                // it flaps whole rows. Flag it so loadCache keeps the short
+                // staleness TTL and the background loop keeps sampling for the
+                // image (holding out for a COVER, not retiring on the title it
+                // already has). Without this, a title-only merge locks the card
+                // to its placeholder cover for 30 days — and a title-only local
+                // BACKUP record, which never expires, would re-impose that lock
+                // on every later resolve, permanently disabling the only retry
+                // path the system has.
+                else if (androidUp && rec._src_title && !rec._src_cover) rec._cover_pending = true;
                 log('av', av, 'merged from {' + Object.keys(perSource).join(',') + '}',
                     attempted ? '(attempted: ' + Array.from(attempted).join(',') + ')' : '',
                     '→', 'cover=' + (rec._src_cover || '·'),
@@ -1242,13 +1343,19 @@
         // forget: the caller paints from `result` immediately; recovered cards
         // are re-patched in place as each walk lands (they stay "已失效视频" so
         // findInvalidContainers keeps finding them until upgraded).
+        // `_cover_pending` avs join the same loop but with a stricter promotion
+        // test (they already have a title; only a cover retires them).
         if (androidUp) {
-            var bgCandidates = todoAvs.filter(function (av) {
+            var bgCandidates = [];
+            var bgCoverOnly  = [];
+            todoAvs.forEach(function (av) {
                 var m = result.get(av);
-                return m && m._pending;
+                if (!m) return;
+                if (m._pending) bgCandidates.push(av);
+                else if (m._cover_pending) { bgCandidates.push(av); bgCoverOnly.push(av); }
             });
             if (bgCandidates.length) {
-                runFlapRecovery(mediaId, bgCandidates)
+                runFlapRecovery(mediaId, bgCandidates, bgCoverOnly)
                     .catch(function (e) { warn('flap-bg threw:', e && e.message); });
             }
         }
@@ -1272,6 +1379,13 @@
     // the loop concludes the leftovers are genuinely filtered and stops. So a
     // still-flapping folder is sampled fast and converges; a truly-deleted set
     // is abandoned after ~7 cheap samples (~4 min) instead of being hammered.
+    //
+    // Two kinds of candidate share the loop: `_pending` avs (nothing usable yet
+    // — any cover OR title retires them) and `_cover_pending` avs (title already
+    // patched onto the card, only the image missing — nothing but a cover
+    // retires them). The caller passes the latter as `coverNeeded`; without that
+    // distinction the title they already have would retire them on walk 1 and
+    // the cover would never be chased.
     //
     // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
     // merge and call schedule(). The still-pending cards remain detectable by
@@ -1311,8 +1425,12 @@
     // leftover set in one walk instead of chasing a single av. Scoped to one
     // folder via _flapLeftoverMid; cleared on folder switch (dropAllInMemory).
     var _flapLeftover = new Set();
+    // Subset of _flapLeftover whose retry is about the COVER only (the title is
+    // already patched onto the card). Kept apart so a manual re-arm restores the
+    // same promotion rule instead of retiring them on the first walk.
+    var _flapLeftoverCover = new Set();
     var _flapLeftoverMid = null;
-    async function runFlapRecovery(mediaId, candidates) {
+    async function runFlapRecovery(mediaId, candidates, coverNeeded) {
         if (_flapBgRunning) return;
         if (!candidates || !candidates.length) return;
         if (!SOURCES.android.enabled()) return;
@@ -1322,6 +1440,12 @@
         // a MANUAL re-arm has nothing else to repaint the cards.
         schedule();
         var pending = new Set(candidates.map(String));
+        // Avs enqueued because their COVER is missing while the title is
+        // already good (`_cover_pending`). The default promotion test below
+        // (!_degenerate) is already satisfied by that title, so it would retire
+        // them after one walk without ever obtaining the image — for these the
+        // merge has to actually carry a cover.
+        var needCover = new Set((coverNeeded || []).map(String));
         var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
         var walk = 0, dry = 0;
         _flapProgress = {
@@ -1371,7 +1495,10 @@
                         if (it) perSource[s] = it;
                     });
                     var merged = mergeBySource(perSource);
-                    if (merged._degenerate) return;   // still no good cover/title — keep trying
+                    // Keep trying while the walk has not produced what this av
+                    // was enqueued for: a cover for the _cover_pending set, any
+                    // usable cover-or-title for everyone else.
+                    if (needCover.has(av) ? !merged._src_cover : merged._degenerate) return;
                     saveCache(av, merged);
                     pending.delete(av);
                     recovered.push(av);
@@ -1415,6 +1542,8 @@
             // If the loop recovered everything, pending is empty → no leftover →
             // the retry menu item won't render (cards are no longer _pending).
             _flapLeftover = new Set(pending);
+            _flapLeftoverCover = new Set();
+            pending.forEach(function (av) { if (needCover.has(av)) _flapLeftoverCover.add(av); });
             _flapLeftoverMid = mediaId;
             // Re-run the patch pass with the loop now inactive so any still-
             // pending cards flip their badge from "重试中" to "待重试".
@@ -1434,11 +1563,15 @@
         if (!mid) { toast('无法识别当前收藏夹', 'warn'); return; }
         if (!SOURCES.android.enabled()) { toast('android 接口不可用，无法重试', 'warn'); return; }
         if (_flapBgRunning) { toast('后台正在重试中，请稍候', 'ok'); return; }
-        var cands = (_flapLeftoverMid === mid) ? Array.from(_flapLeftover) : [];
-        if (!cands.length && clickedAv) cands = [String(clickedAv)];
+        var sameFolder = (_flapLeftoverMid === mid);
+        var cands     = sameFolder ? Array.from(_flapLeftover)      : [];
+        var coverOnly = sameFolder ? Array.from(_flapLeftoverCover) : [];
+        if (!cands.length && clickedAv) { cands = [String(clickedAv)]; coverOnly = []; }
         if (!cands.length) { toast('没有待重试的视频', 'ok'); return; }
-        toast('正在重新抓取 ' + cands.length + ' 项待重试视频', 'ok');
-        runFlapRecovery(mid, cands).catch(function (e) { warn('manual retry threw:', e); });
+        // The leftover set can also hold cards that ARE patched and only lack a
+        // cover, so the wording is deliberately not "待重试" alone.
+        toast('正在重新抓取 ' + cands.length + ' 项未完全还原的视频', 'ok');
+        runFlapRecovery(mid, cands, coverOnly).catch(function (e) { warn('manual retry threw:', e); });
     }
 
     // ─── URL / page detection ───────────────────────────────────────────
@@ -1618,12 +1751,35 @@
         return null;
     }
 
-    function patchCover(img, realCoverUrl) {
+    function patchCover(img, realCoverUrl, av) {
         if (!img || !realCoverUrl) return;
         // bilibili web is https — Android-app responses are sometimes http.
         var u = realCoverUrl.replace(/^http:\/\//, 'https://');
         if (img.getAttribute('data-fav-fix-original')) return; // already patched
         img.setAttribute('data-fav-fix-original', img.src || '');
+        // Last-resort cover: bilibili sometimes purges the IMAGE while the
+        // metadata snapshot survives, so the URL we just recovered 404s and the
+        // card ends up with real title + broken cover. If a manual backup
+        // (15a-backup.js) captured the bytes, swap in an objectURL.
+        // data-fav-fix-blob-cover is the idempotence guard for BOTH the
+        // observer (which re-enters patchCover on every tick) and the error
+        // handler itself — without it an undecodable blob would re-fire
+        // `error` on the objectURL and loop forever.
+        if (av && !img.getAttribute('data-fav-fix-blob-cover')) {
+            img.addEventListener('error', function onCoverError() {
+                img.removeEventListener('error', onCoverError);
+                if (img.getAttribute('data-fav-fix-blob-cover')) return;
+                img.setAttribute('data-fav-fix-blob-cover', 'pending');
+                backupCoverObjectUrl(av).then(function (objUrl) {
+                    if (!objUrl) { img.setAttribute('data-fav-fix-blob-cover', 'miss'); return; }
+                    img.setAttribute('data-fav-fix-blob-cover', 'hit');
+                    img.src = objUrl;
+                }).catch(function (e) {
+                    img.setAttribute('data-fav-fix-blob-cover', 'miss');
+                    warn('backup cover fallback failed for av', av, e && e.message);
+                });
+            });
+        }
         img.src = u;
         img.style.opacity = '1';
     }
@@ -1785,6 +1941,7 @@
     // Source attribution chips. Color-coded per source so the user can
     // see at a glance which API contributed which field of the snapshot.
     var SOURCE_COLORS = {
+        backup:    '#8e44ad',
         android:   '#5b8def',
         'public':  '#67c23a',
         biliplus:  '#e6a23c',
@@ -2654,7 +2811,12 @@
         // avs. The loop itself bails on detectMediaId() mismatch, but clearing
         // here keeps kickManualRetry's leftover lookup honest.
         _flapLeftover.clear();
+        _flapLeftoverCover.clear();
         _flapLeftoverMid = null;
+        // Same reasoning for the credential-less restore path's negative memo
+        // (14-orchestrate.js): it records "no local data for this av", which is
+        // only meaningful for the folder currently on screen.
+        _localOnlyMiss.clear();
     }
 
     async function fetchAllAvList(mediaId) {
@@ -3043,7 +3205,9 @@
                 // spinner would hang forever. 4s is generous for
                 // hdslb but short enough to not feel broken.
                 setTimeout(finish, 4000);
-                patchCover(img, real.cover);
+                // Third arg = av: lets patchCover fall back to the local
+                // backup's cover Blob if this URL 404s (09-dom.js).
+                patchCover(img, real.cover, real.oid != null ? String(real.oid) : null);
             })(hit.img, hit);
         } else {
             // Either no real.cover (rare — source returned title
@@ -3056,6 +3220,65 @@
         if (real.title) patchTitle(hit.container, real.title);
         markPatched(hit, real);
         return 'patched';
+    }
+
+    // ─── Credential-less restore ────────────────────────────────────────
+    // Avs this pass already looked up locally and found nothing for. Without it
+    // every observer tick would re-open an IndexedDB transaction per unpatched
+    // card. Folder-scoped: dropAllInMemory() clears it (13-missing.js), and so
+    // does a backup run, which is the one thing that can turn a miss into a hit
+    // without a page load.
+    var _localOnlyMiss = new Set();
+
+    // Runs INSTEAD of the resolver when there is no access_key. It must not
+    // touch the network (android owns every invalid-item snapshot and is
+    // appkey+token signed, so the rescue chain genuinely cannot run) and must
+    // not write the GM cache — a later logged-in resolve has to stay free to
+    // ask android and the third-party archives about whatever the local layers
+    // could not answer. Two credential-free sources are available: a merge
+    // persisted by an earlier session, and the IndexedDB backup, which was
+    // captured while the videos were still alive and needs no login at all.
+    // Before this path existed, a fully backed-up folder restored NOTHING once
+    // the user logged out.
+    async function restoreLocalOnly(hits) {
+        var todo = [];
+        var patched = 0;
+        hits.forEach(function (hit) {
+            var av = getAvFromHit(hit);
+            if (!av || _localOnlyMiss.has(av)) return;
+            var c = loadCache(av);
+            if (c) {
+                try { if (applyPatch(hit, c) === 'patched') patched++; }
+                catch (e) { warn('local-only fast-path applyPatch threw for av', av, e); }
+            } else {
+                todo.push({ hit: hit, av: av });
+            }
+        });
+        if (todo.length && SOURCES.backup && SOURCES.backup.enabled()) {
+            var avs = todo.map(function (t) { return t.av; });
+            var recs = null;
+            try { recs = await SOURCES.backup.fetchAvs(avs); }
+            catch (e) { warn('local-only backup lookup failed:', e && e.message); }
+            if (recs) {
+                todo.forEach(function (t) {
+                    var item = recs.get(t.av);
+                    if (!item) { _localOnlyMiss.add(t.av); return; }
+                    // Run it through the normal merge so the card, the tooltip
+                    // and the clipboard text see exactly the shape they see on
+                    // the logged-in path (_src_* provenance included).
+                    var real = mergeBySource({ backup: item });
+                    if (real._degenerate) { _localOnlyMiss.add(t.av); return; }
+                    real._attempted = ['backup'];
+                    try { if (applyPatch(t.hit, real) === 'patched') patched++; }
+                    catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
+                });
+            }
+        } else {
+            todo.forEach(function (t) { _localOnlyMiss.add(t.av); });
+        }
+        log('no access_key —', patched, 'of', hits.length,
+            'invalid card(s) restored from local data (GM cache + backup);',
+            'the rest need a login');
     }
 
     // Re-entrancy guard. patchOnceInner is async and a phase-1 walk can take
@@ -3094,7 +3317,11 @@
         if (hits.length === 0) return;
         var auth = getAuth();
         if (!auth.access_key) {
-            log(hits.length, 'invalid items on page, but no access_key — skip');
+            // No credential → the NETWORK rescue chain is unavailable, but the
+            // local layers are not: restore what the GM cache and the local
+            // backup can serve instead of leaving a fully backed-up folder
+            // untouched. Nothing below this point is reachable without a login.
+            await restoreLocalOnly(hits);
             return;
         }
         log('detected', hits.length, 'invalid items, mediaId=', mediaId);
@@ -3265,6 +3492,586 @@
         setTimeout(function () { try { el.remove(); } catch (e) {} }, 4500);
     }
 
+    // ─── Manual backup to IndexedDB (pre-emptive snapshot) ──────────────
+    //
+    // Everything else in this script is AFTER-THE-FACT rescue: an item is
+    // already invalid and we go begging android / public / biliplus /
+    // jijidown for whatever snapshot they kept. This module is the opposite —
+    // the user triggers it while the videos are still ALIVE and we copy the
+    // whole folder (metadata AND the cover image BYTES) into IndexedDB. When
+    // an item later dies, SOURCES.backup answers from local disk: no network,
+    // no third party, no flap.
+    //
+    // Why IndexedDB and not GM storage: GM_setValue serializes to JSON, which
+    // cannot hold a Blob. Cover bytes are the whole point (a metadata-only
+    // backup still dies when bilibili's CDN purges the image), so the store
+    // has to be one that persists structured-cloneable values.
+    //
+    // Cross-file invariants (see AGENTS.md):
+    //   - The backup DB is NEVER touched by any cache-clearing path
+    //     (clearAllItemCache / dropItemCaches / the "清除所有缓存" menu). Those
+    //     clear DERIVED data that can be re-fetched; a backup cannot.
+    //   - IndexedDB is origin-scoped. space.bilibili.com and www.bilibili.com
+    //     therefore keep SEPARATE backup databases; a folder backed up on one
+    //     origin does not restore on the other. Documented, not worked around.
+    //   - Adding SOURCES.backup changes merge semantics, so CACHE_VERSION was
+    //     bumped (07-cache.js) — otherwise entries cached before this feature
+    //     would never consult the backup.
+    //   - Writing an item is an UPSERT WITH CARRY-FORWARD, never a blind
+    //     full-record replace. idbPut() replaces the whole record, so every
+    //     field a re-run cannot re-derive (above all the cover Blob) must be
+    //     read from the stored record and copied into the new one first. A
+    //     backup is the user's only copy; a re-run that finds less than the
+    //     last one must degrade to "kept what we had", never to data loss.
+
+    var BACKUP_DB_NAME     = 'bili-fav-fix-backup';
+    var BACKUP_DB_VERSION  = 1;
+    var BACKUP_STORE_ITEMS = 'items';
+    var BACKUP_STORE_META  = 'meta';
+
+    // Walk limits. 500 pages x ps=20 = 10000 items: far above MAX_PAGE_WALK
+    // (which bounds the *rescue* walks, where a long walk delays a DOM patch)
+    // because a backup is an explicit, user-initiated, one-off operation and
+    // truncating it silently loses data the user asked us to keep.
+    var BACKUP_MAX_PAGES        = 500;
+    var BACKUP_PAGE_DELAY_MS    = 300;   // politeness gap between folder pages
+    var BACKUP_BLOB_CONCURRENCY = 3;     // parallel cover downloads
+    var BACKUP_PROGRESS_EVERY   = 3;     // toast every N pages (page 1 always)
+
+    // ─── IndexedDB plumbing ─────────────────────────────────────────────
+    // Lazy single open, promise-wrapped. No third-party wrapper library: the
+    // four operations below are all this feature needs, and the core ships as
+    // one inlined IIFE where every extra KB is downloaded on each page load.
+
+    var _backupDbPromise = null;
+
+    function backupDb() {
+        if (_backupDbPromise) return _backupDbPromise;
+        _backupDbPromise = new Promise(function (resolve, reject) {
+            if (typeof indexedDB === 'undefined') {
+                reject(new Error('IndexedDB unavailable in this context'));
+                return;
+            }
+            var req = indexedDB.open(BACKUP_DB_NAME, BACKUP_DB_VERSION);
+            req.onupgradeneeded = function () {
+                var db = req.result;
+                if (!db.objectStoreNames.contains(BACKUP_STORE_ITEMS)) {
+                    // keyPath 'av' is a STRING everywhere (String(oid)), matching
+                    // the GM cache key type so the two layers can be compared
+                    // without coercion surprises.
+                    var items = db.createObjectStore(BACKUP_STORE_ITEMS, { keyPath: 'av' });
+                    items.createIndex('bvid', 'bvid', { unique: false });
+                }
+                if (!db.objectStoreNames.contains(BACKUP_STORE_META)) {
+                    db.createObjectStore(BACKUP_STORE_META, { keyPath: 'media_id' });
+                }
+            };
+            req.onsuccess  = function () { resolve(req.result); };
+            req.onerror    = function () { reject(req.error || new Error('indexedDB.open failed')); };
+            req.onblocked  = function () { reject(new Error('indexedDB.open blocked by another tab')); };
+        });
+        // Never cache a REJECTED open: a transient failure (private-mode quota,
+        // a blocked upgrade from another tab) would otherwise disable the
+        // backup for the rest of the page's life.
+        _backupDbPromise.catch(function () { _backupDbPromise = null; });
+        return _backupDbPromise;
+    }
+
+    function idbReq(req) {
+        return new Promise(function (resolve, reject) {
+            req.onsuccess = function () { resolve(req.result); };
+            req.onerror   = function () { reject(req.error || new Error('IndexedDB request failed')); };
+        });
+    }
+
+    function idbGet(store, key) {
+        return backupDb().then(function (db) {
+            return idbReq(db.transaction(store, 'readonly').objectStore(store).get(key));
+        });
+    }
+
+    function idbPut(store, value) {
+        return backupDb().then(function (db) {
+            return idbReq(db.transaction(store, 'readwrite').objectStore(store).put(value));
+        });
+    }
+
+    function idbCount(store) {
+        return backupDb().then(function (db) {
+            return idbReq(db.transaction(store, 'readonly').objectStore(store).count());
+        });
+    }
+
+    // Cursor walk — the only way to aggregate over the store without loading
+    // every Blob-bearing record into memory at once.
+    function idbCursorEach(store, fn) {
+        return backupDb().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var req = db.transaction(store, 'readonly').objectStore(store).openCursor();
+                req.onsuccess = function () {
+                    var cur = req.result;
+                    if (!cur) { resolve(); return; }
+                    try { fn(cur.value); } catch (e) { reject(e); return; }
+                    cur.continue();
+                };
+                req.onerror = function () { reject(req.error || new Error('cursor failed')); };
+            });
+        });
+    }
+
+    // ─── Helpers ────────────────────────────────────────────────────────
+
+    function backupSleep(ms) {
+        return new Promise(function (r) { setTimeout(r, ms); });
+    }
+
+    // bilibili cover URLs carry an "@<w>w_<h>h.webp"-style transform suffix.
+    // Strip it so the stored bytes are the ORIGINAL image (and so the
+    // cover_url equality check that skips a re-download is stable across
+    // layouts that request different thumbnail sizes).
+    function stripCoverSuffix(url) {
+        if (!url) return '';
+        var m = String(url).match(/^([^@]*)@/);
+        return (m ? m[1] : String(url)).replace(/^http:\/\//, 'https://');
+    }
+
+    function fmtBytes(n) {
+        if (!n) return '0 B';
+        var u = ['B', 'KB', 'MB', 'GB'], i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return (i === 0 ? n : n.toFixed(1)) + ' ' + u[i];
+    }
+
+    // First candidate whose value passes the SAME QUALITY predicate the merge
+    // layer uses — so a placeholder cover or an "已失效视频" title never wins
+    // just because its source came first. Candidates may be null (skipped).
+    function backupPick(candidates, key) {
+        var q = QUALITY[key] || QUALITY['default'];
+        for (var i = 0; i < candidates.length; i++) {
+            var c = candidates[i];
+            if (!c) continue;
+            var v = c[key];
+            if (q(v) > 0) return v;
+        }
+        return undefined;
+    }
+
+    var _persistAsked = false;
+    function requestPersistentStorageOnce() {
+        if (_persistAsked) return;
+        _persistAsked = true;
+        try {
+            if (!navigator.storage || !navigator.storage.persist) return;
+            // Fire-and-forget: without a persistence grant the browser may evict
+            // the DB under storage pressure. Nothing to do if it is denied —
+            // an evicted backup degrades to "no backup", not to a broken script.
+            navigator.storage.persist().then(function (granted) {
+                console.info('[fav-fix/backup] navigator.storage.persist() →', granted);
+            }).catch(function (e) { warn('backup persist() rejected:', e && e.message); });
+        } catch (e) { warn('backup persist() threw:', e && e.message); }
+    }
+
+    // ─── Backup walker ──────────────────────────────────────────────────
+
+    var _backupRunning = false;
+
+    // Build the record we would store for one live list item, or null if the
+    // item must be skipped. Reads the existing record so an unchanged cover is
+    // NOT re-downloaded (a re-run over a large folder is then metadata-only).
+    async function buildBackupRecord(item, mediaId, stats) {
+        var av = String(item.oid);
+        var liveOk = QUALITY.title(item.title) > 0 && QUALITY.cover(item.cover) > 0;
+        var primary = item, fallback = null, dataSource = 'live';
+        if (!liveOk) {
+            // Already invalid at backup time. Not necessarily a loss: if the
+            // rescue path previously recovered this av, the merged snapshot in
+            // GM storage is real data worth persisting (GM entries expire;
+            // the backup does not). Anything else is a genuine blank.
+            var cached = loadCache(av);
+            if (!cached || !(cached._src_cover || cached._src_title)) {
+                stats.skipped_invalid++;
+                return null;
+            }
+            primary = cached; fallback = item; dataSource = 'merged';
+        }
+
+        // Title / cover URLs come from THIS run only. The stored record is
+        // deliberately NOT a candidate here: re-picking the archived URL as if
+        // it were fresh evidence would defeat the "has the cover changed?"
+        // check below. It is still never DISCARDED — the bytes it already
+        // holds are carried forward a few lines down.
+        var title = backupPick([primary, fallback], 'title');
+        var coverUrl = stripCoverSuffix(backupPick([primary, fallback], 'cover'));
+        // Final placeholder gate. Everything above already applies QUALITY, but
+        // this store is meant to be trustworthy FOREVER — one placeholder cover
+        // or "已失效视频" title written here would be served back as gospel by
+        // SOURCES.backup at the top of FIELD_PRIORITY, permanently outranking
+        // the live sources. Cheap belt-and-braces.
+        if (coverUrl && COVER_PLACEHOLDER_RE.test(coverUrl)) coverUrl = '';
+        if (!title || String(title).trim() === INVALID_TITLE) {
+            stats.skipped_invalid++;
+            return null;
+        }
+
+        // The stored record has to be READ before it can be safely rewritten:
+        // idbPut replaces the record wholesale, and the cover bytes in it have
+        // no upstream to re-fetch from. If the read fails we do not know what
+        // is already archived, so any write would be a blind overwrite — skip
+        // the av entirely and let the next run try again (this also stops
+        // media_ids from being truncated to the current folder).
+        var existing = null;
+        try { existing = await idbGet(BACKUP_STORE_ITEMS, av); }
+        catch (e) {
+            warn('backup: idbGet failed for av', av, e && e.message);
+            stats.read_failed++;
+            return null;
+        }
+
+        // Secondary fields fall back to the STORED record last: re-running a
+        // backup after an item went invalid must never downgrade a field we
+        // already captured while it was alive (the merged rescue snapshot
+        // carries fewer fields than the live listing).
+        var chain = [primary, fallback, existing];
+        var upper = backupPick(chain, 'upper');
+        var mediaIds = (existing && Array.isArray(existing.media_ids)) ? existing.media_ids.slice() : [];
+        if (mediaIds.indexOf(Number(mediaId)) < 0) mediaIds.push(Number(mediaId));
+
+        // Cover bytes are the one thing in this store with NO upstream to
+        // re-fetch from, and idbPut replaces the whole record — so the new
+        // record STARTS from whatever is already archived and is overwritten
+        // only when this run actually holds replacement bytes (see
+        // commitBackupRecord). Seeding these four fields with nulls instead
+        // would delete a good image every time the item has since died (no
+        // cover left to re-derive) or the CDN refuses today's download.
+        // cover_url always travels WITH the bytes it describes: while an old
+        // blob is being kept the stored URL stays the old one, so the next run
+        // still sees url != coverUrl and re-queues the new image — the
+        // self-healing retry survives.
+        var keptBlob  = (existing && existing.cover_blob) || null;
+        var storedUrl = keptBlob ? existing.cover_url
+                                 : (coverUrl || (existing && existing.cover_url) || null);
+
+        var rec = {
+            av:        av,
+            bvid:      backupPick(chain, 'bvid') || null,
+            title:     title,
+            intro:     backupPick(chain, 'intro') || '',
+            upper:     upper ? { mid: upper.mid, name: upper.name, face: upper.face } : null,
+            cnt_info:  backupPick(chain, 'cnt_info') || null,
+            tid:       backupPick(chain, 'tid'),
+            duration:  backupPick(chain, 'duration'),
+            pubtime:   backupPick(chain, 'pubtime'),
+            ctime:     backupPick(chain, 'ctime'),
+            fav_time:  backupPick(chain, 'fav_time'),
+            pages:     backupPick(chain, 'pages'),
+            page:      backupPick(chain, 'page'),
+            link:      backupPick(chain, 'link') || '',
+            cover_url:  storedUrl,
+            cover_blob: keptBlob,
+            cover_type: keptBlob ? (existing.cover_type || null) : null,
+            cover_size: keptBlob ? (existing.cover_size || 0) : 0,
+            media_ids:  mediaIds,
+            backed_at:  Date.now(),
+            data_source: dataSource
+        };
+
+        // Re-download only when the bytes we hold no longer match the URL we
+        // just saw (or we never got them). A missing blob is retried on every
+        // subsequent run for free — that is the intended self-healing path for
+        // a cover the CDN refused today.
+        var reuse = !!(keptBlob && existing.cover_url === coverUrl);
+        var fetchUrl = (!reuse && coverUrl) ? coverUrl : null;
+        // Archived image kept without even attempting a replacement, i.e. this
+        // run produced no usable cover URL at all (the item died since the last
+        // backup). Counted separately so a run that quietly stopped refreshing
+        // covers is not reported as a plain 更新.
+        if (keptBlob && !reuse && !fetchUrl) stats.cover_kept++;
+        // metaOnly = an entry that already existed and needs no download, i.e.
+        // the "更新" bucket. A brand-new entry counts as "新增" even when it
+        // carries no cover at all (title-only merged records).
+        return { rec: rec, fetchUrl: fetchUrl, keptBlob: !!keptBlob,
+                 metaOnly: !fetchUrl && !!existing };
+    }
+
+    async function commitBackupRecord(task, stats) {
+        if (task.fetchUrl) {
+            try {
+                var blob = await gmGetBlob(task.fetchUrl);
+                // URL and bytes are replaced as ONE unit — cover_url must always
+                // describe the image actually stored, otherwise the reuse check
+                // in buildBackupRecord would skip re-downloading a cover we
+                // never obtained.
+                task.rec.cover_url  = task.fetchUrl;
+                task.rec.cover_blob = blob;
+                task.rec.cover_type = blob.type || null;
+                task.rec.cover_size = blob.size || 0;
+            } catch (e) {
+                // Leave the carried-forward fields alone. Deleting the only
+                // copy of an already-archived cover because today's download
+                // failed is unrecoverable; the record keeps the OLD url+bytes,
+                // so the next run again sees url != coverUrl and re-queues the
+                // new image. When nothing was archived yet, cover_blob simply
+                // stays null and the URL is retried on the next run.
+                stats.blob_failed++;
+                if (task.keptBlob) stats.cover_kept++;
+                warn('backup: cover fetch failed for av', task.rec.av, e && e.message);
+            }
+        }
+        if (task.metaOnly) stats.updated++;
+        else stats.backed++;
+        try { await idbPut(BACKUP_STORE_ITEMS, task.rec); }
+        catch (e) { warn('backup: idbPut failed for av', task.rec.av, e && e.message); }
+    }
+
+    async function backupPageItems(list, mediaId, stats) {
+        var tasks = [];
+        for (var i = 0; i < list.length; i++) {
+            var item = list[i];
+            if (!item || item.oid == null) continue;
+            stats.total_seen++;
+            var t = await buildBackupRecord(item, mediaId, stats);
+            if (t) tasks.push(t);
+        }
+        // Bounded parallelism for the cover downloads: serial is needlessly
+        // slow on a 200-item folder, unbounded hammers the CDN.
+        for (var j = 0; j < tasks.length; j += BACKUP_BLOB_CONCURRENCY) {
+            var chunk = tasks.slice(j, j + BACKUP_BLOB_CONCURRENCY);
+            await Promise.all(chunk.map(function (t) { return commitBackupRecord(t, stats); }));
+        }
+    }
+
+    // Entry point for both the Tampermonkey menu command and
+    // __biliFavFix.backup.run().
+    async function backupCurrentFolder() {
+        if (_backupRunning) { toast('备份正在进行中', 'warn'); return null; }
+        if (typeof indexedDB === 'undefined') {
+            toast('当前环境不支持 IndexedDB，无法备份', 'err');
+            return null;
+        }
+        var mediaId = detectMediaId();
+        if (!mediaId) { toast('无法识别当前收藏夹 ID', 'err'); return null; }
+
+        _backupRunning = true;
+        requestPersistentStorageOnce();
+        var stats = {
+            total_seen: 0, backed: 0, updated: 0, skipped_invalid: 0,
+            blob_failed: 0, cover_kept: 0, read_failed: 0
+        };
+        var aborted = false;
+        try {
+            toast('开始备份当前收藏夹');
+            var pn = 1;
+            while (pn <= BACKUP_MAX_PAGES) {
+                // Walk `public` DIRECTLY, bypassing ensurePage/pageCache. Same
+                // reasoning as the flap loop (AGENTS.md gotcha 16b): we want a
+                // fresh server sample, and a long backup walk must not poison
+                // the foreground resolver's page cache. `public` (not android)
+                // because a backup runs while the items are still valid, and
+                // public carries the fuller field set (pubtime / fav_time /
+                // tid / pages) that the android endpoint omits.
+                var page = null;
+                for (var attempt = 0; attempt < 2 && !page; attempt++) {
+                    try { page = await SOURCES['public'].fetchPage({ mediaId: mediaId, pn: pn }); }
+                    catch (e) {
+                        warn('backup: page ' + pn + ' attempt ' + (attempt + 1) + ' failed:', e.message);
+                        if (attempt === 0) await backupSleep(1000);
+                    }
+                }
+                if (!page) {
+                    aborted = true;
+                    toast('备份中止：第 ' + pn + ' 页抓取失败，已写入的数据保留', 'err');
+                    break;
+                }
+                await backupPageItems(page.list || [], mediaId, stats);
+                // Every page would out-run the toast's own 4.5s lifetime and
+                // stack overlapping banners; every 3rd page keeps the feedback
+                // continuous without piling up.
+                if (pn % BACKUP_PROGRESS_EVERY === 0) {
+                    toast('备份中：第 ' + pn + ' 页，已处理 ' + stats.total_seen + ' 项');
+                }
+                if (!page.has_more) break;
+                pn++;
+                await backupSleep(BACKUP_PAGE_DELAY_MS);
+            }
+            if (!aborted) {
+                var summary = '备份完成：新增 ' + stats.backed + ' · 更新 ' + stats.updated
+                            + ' · 跳过失效 ' + stats.skipped_invalid
+                            + ' · 封面失败 ' + stats.blob_failed;
+                // Appended only when non-zero: both mean "this run did not
+                // refresh everything it looked at", which the plain 更新 count
+                // would otherwise hide.
+                if (stats.cover_kept)  summary += ' · 沿用旧封面 ' + stats.cover_kept;
+                if (stats.read_failed) summary += ' · 读取失败 ' + stats.read_failed;
+                toast(summary, 'ok');
+            }
+            return stats;
+        } finally {
+            _backupRunning = false;
+            // A run just turned "no local data for this av" into "there is
+            // now", so the credential-less restore path must re-check
+            // (14-orchestrate.js); nothing else invalidates that memo without
+            // a page load.
+            _localOnlyMiss.clear();
+            await writeBackupMeta(mediaId, stats, aborted, pn);
+        }
+    }
+
+    // The meta record is the ONLY per-folder answer to "when was this folder
+    // last backed up in full", and 查看备份状态 reads it. An aborted walk must
+    // therefore not overwrite a previous COMPLETE run's figures with its own
+    // truncated ones — that would report a 40-of-300 failure as a fresh 40-item
+    // backup and hide the fact that the folder still needs a full pass. Keep
+    // the last complete run intact and record the failed attempt beside it.
+    async function writeBackupMeta(mediaId, stats, aborted, lastPage) {
+        var key = String(mediaId);
+        var prev = null;
+        try { prev = await idbGet(BACKUP_STORE_META, key); }
+        catch (e) { warn('backup: meta read failed', e && e.message); }
+        var rec;
+        if (aborted && prev) {
+            rec = {};
+            for (var k in prev) rec[k] = prev[k];
+        } else {
+            // A completed walk, or an abort with no earlier run to preserve
+            // (recording the partial figures beats recording nothing — the
+            // partial flag below keeps the readout honest either way).
+            rec = {
+                media_id:        key,
+                last_run:        Date.now(),
+                total_seen:      stats.total_seen,
+                backed:          stats.backed,
+                updated:         stats.updated,
+                skipped_invalid: stats.skipped_invalid,
+                blob_failed:     stats.blob_failed,
+                cover_kept:      stats.cover_kept,
+                read_failed:     stats.read_failed
+            };
+        }
+        rec.media_id             = key;
+        rec.last_attempt         = Date.now();
+        rec.last_attempt_partial = !!aborted;
+        rec.last_attempt_page    = aborted ? (lastPage || 0) : 0;
+        try { await idbPut(BACKUP_STORE_META, rec); }
+        catch (e) { warn('backup: meta write failed', e && e.message); }
+    }
+
+    // ─── Status ─────────────────────────────────────────────────────────
+
+    async function backupStatus() {
+        var out = {
+            items: 0, coverBytes: 0, withCover: 0,
+            quotaUsed: null, quota: null, folder: null
+        };
+        out.items = await idbCount(BACKUP_STORE_ITEMS);
+        await idbCursorEach(BACKUP_STORE_ITEMS, function (rec) {
+            if (rec && rec.cover_size) { out.coverBytes += rec.cover_size; out.withCover++; }
+        });
+        try {
+            if (navigator.storage && navigator.storage.estimate) {
+                var est = await navigator.storage.estimate();
+                out.quotaUsed = est.usage;
+                out.quota = est.quota;
+            }
+        } catch (e) { warn('backup: storage.estimate failed', e && e.message); }
+        var mid = detectMediaId();
+        if (mid) {
+            try { out.folder = (await idbGet(BACKUP_STORE_META, String(mid))) || null; }
+            catch (e) { warn('backup: meta read failed', e && e.message); }
+        }
+        return out;
+    }
+
+    // Menu-facing wrapper: same single-line concatenated style as
+    // "查看登录状态" so the toast stays one readable band.
+    function showBackupStatus() {
+        backupStatus().then(function (s) {
+            var last = '未备份';
+            if (s.folder && s.folder.last_run) {
+                var days = Math.floor((Date.now() - s.folder.last_run) / 86400000);
+                last = (days <= 0 ? '今天' : days + ' 天前')
+                     + '（' + (s.folder.total_seen || 0) + ' 项）';
+            }
+            // last_run describes the last COMPLETE pass; an aborted attempt is
+            // recorded separately so the folder is not reported as up to date.
+            if (s.folder && s.folder.last_attempt_partial) {
+                last += ' · 上次备份中止于第 ' + (s.folder.last_attempt_page || 0) + ' 页';
+            }
+            var quota = (s.quotaUsed == null) ? '未知'
+                      : fmtBytes(s.quotaUsed) + ' / ' + fmtBytes(s.quota);
+            toast('备份条目：' + s.items + ' 项'
+                  + '　封面：' + s.withCover + ' 张 / ' + fmtBytes(s.coverBytes)
+                  + '　浏览器存储：' + quota
+                  + '　本收藏夹：' + last);
+        }).catch(function (e) {
+            toast('读取备份状态失败：' + (e && e.message), 'err');
+        });
+    }
+
+    // ─── Cover fallback for the DOM layer ───────────────────────────────
+    // Used by patchCover (09-dom.js) when the recovered cover URL 404s: the
+    // metadata outlived the image on bilibili's CDN, but our own copy of the
+    // bytes did not. Resolves to null when we have nothing.
+    function backupCoverObjectUrl(av) {
+        if (typeof indexedDB === 'undefined') return Promise.resolve(null);
+        return idbGet(BACKUP_STORE_ITEMS, String(av)).then(function (rec) {
+            if (!rec || !rec.cover_blob) return null;
+            // Not revoked: the number of live objectURLs is bounded by the
+            // number of dead-cover cards on one page, and revoking early would
+            // blank the <img> the moment bilibili's virtual scroller re-renders.
+            return URL.createObjectURL(rec.cover_blob);
+        });
+    }
+
+    // ─── Source registration ────────────────────────────────────────────
+    // Registered at load time (this module runs after 05-sources.js, so
+    // `SOURCES` is already initialized — see AGENTS.md on MANIFEST ordering).
+    // Queried by the resolver in PHASE 0, before any network source, and
+    // ranked first in FIELD_PRIORITY for every field it supplies: a backup was
+    // captured while the video was alive, so it is strictly better evidence
+    // than any post-mortem snapshot.
+    SOURCES.backup = {
+        name: 'backup',
+        paginated: false,
+        enabled: function () { return typeof indexedDB !== 'undefined'; },
+        fetchAvs: async function (avs) {
+            var out = new Map();
+            if (!avs || !avs.length) return out;
+            for (var i = 0; i < avs.length; i++) {
+                var av = String(avs[i]);
+                var rec;
+                try { rec = await idbGet(BACKUP_STORE_ITEMS, av); }
+                catch (e) {
+                    // A dead DB fails identically for every remaining av —
+                    // stop rather than repeat the same error N times.
+                    warn('backup: lookup aborted at av', av, e && e.message);
+                    break;
+                }
+                if (!rec) continue;
+                // Deliberately NOT returned: `attr` and `link`. Those describe
+                // the item's CURRENT state / navigation target, which the live
+                // sources own; a stale backed-up `attr` would tell the UI a
+                // dead video is still valid.
+                out.set(av, {
+                    oid:      Number(av),
+                    bvid:     rec.bvid || undefined,
+                    title:    rec.title,
+                    cover:    rec.cover_url || undefined,
+                    intro:    rec.intro || undefined,
+                    duration: rec.duration,
+                    upper:    rec.upper || undefined,
+                    cnt_info: rec.cnt_info || undefined,
+                    tid:      rec.tid,
+                    pubtime:  rec.pubtime,
+                    ctime:    rec.ctime,
+                    fav_time: rec.fav_time,
+                    pages:    rec.pages,
+                    page:     rec.page
+                });
+            }
+            if (out.size) console.info('[fav-fix/backup] restored', out.size, 'of', avs.length, 'av(s) from local backup');
+            return out;
+        }
+    };
     // ─── Menu commands ──────────────────────────────────────────────────
 
     try {
@@ -3298,6 +4105,16 @@
             toast('已清除 ' + n + ' 项缓存，正在刷新…', 'ok');
             setTimeout(function () { location.reload(); }, 600);
         });
+        GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', function () {
+            // Async and long-running; nothing awaits it, so swallow rejections
+            // here or an unexpected throw surfaces only as an unhandled
+            // rejection in the console.
+            backupCurrentFolder().catch(function (e) {
+                warn('backup run threw', e);
+                toast('备份失败：' + (e && e.message), 'err');
+            });
+        });
+        GM_registerMenuCommand('fav-fix：查看备份状态', showBackupStatus);
         GM_registerMenuCommand('fav-fix：查看登录状态', function () {
             var a = getAuth();
             var age = a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null;
@@ -3439,6 +4256,12 @@
             dropItemCaches(av);
             return patchOnce();
         },
+        // Manual IndexedDB backup (15a-backup.js). run() walks the current
+        // folder and stores metadata + cover Blobs; status() reports item
+        // count, cover bytes, browser quota and this folder's last run. Same
+        // pair the two Tampermonkey menu commands drive, exposed here so the
+        // whole flow can be verified from the console.
+        backup: { run: backupCurrentFolder, status: backupStatus },
         // Missing-item recovery (task #15): inspection + manual trigger
         fetchAllAvList: fetchAllAvList,
         fetchFullPhase1Avs: fetchFullPhase1Avs,
@@ -3466,7 +4289,9 @@
                 '__biliFavFix.getAuth()            { mode, hasAccessKey, ageDays } (key redacted)',
                 '__biliFavFix.patchNow()           drop caches and re-scan DOM',
                 '__biliFavFix.forceRefetch(bvOrAv) drop one item cache + re-patch',
-                '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage',
+                '__biliFavFix.backup.run()         back up this folder (metadata + covers) to IndexedDB',
+                '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
+                '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',
                 '__biliFavFix.bvToAv(bv) / avToBv(av)'
             ].join('\n'));

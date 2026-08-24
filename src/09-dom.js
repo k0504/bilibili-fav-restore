@@ -175,12 +175,35 @@
         return null;
     }
 
-    function patchCover(img, realCoverUrl) {
+    function patchCover(img, realCoverUrl, av) {
         if (!img || !realCoverUrl) return;
         // bilibili web is https — Android-app responses are sometimes http.
         var u = realCoverUrl.replace(/^http:\/\//, 'https://');
         if (img.getAttribute('data-fav-fix-original')) return; // already patched
         img.setAttribute('data-fav-fix-original', img.src || '');
+        // Last-resort cover: bilibili sometimes purges the IMAGE while the
+        // metadata snapshot survives, so the URL we just recovered 404s and the
+        // card ends up with real title + broken cover. If a manual backup
+        // (15a-backup.js) captured the bytes, swap in an objectURL.
+        // data-fav-fix-blob-cover is the idempotence guard for BOTH the
+        // observer (which re-enters patchCover on every tick) and the error
+        // handler itself — without it an undecodable blob would re-fire
+        // `error` on the objectURL and loop forever.
+        if (av && !img.getAttribute('data-fav-fix-blob-cover')) {
+            img.addEventListener('error', function onCoverError() {
+                img.removeEventListener('error', onCoverError);
+                if (img.getAttribute('data-fav-fix-blob-cover')) return;
+                img.setAttribute('data-fav-fix-blob-cover', 'pending');
+                backupCoverObjectUrl(av).then(function (objUrl) {
+                    if (!objUrl) { img.setAttribute('data-fav-fix-blob-cover', 'miss'); return; }
+                    img.setAttribute('data-fav-fix-blob-cover', 'hit');
+                    img.src = objUrl;
+                }).catch(function (e) {
+                    img.setAttribute('data-fav-fix-blob-cover', 'miss');
+                    warn('backup cover fallback failed for av', av, e && e.message);
+                });
+            });
+        }
         img.src = u;
         img.style.opacity = '1';
     }

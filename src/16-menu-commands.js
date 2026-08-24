@@ -31,6 +31,16 @@
             toast('已清除 ' + n + ' 项缓存，正在刷新…', 'ok');
             setTimeout(function () { location.reload(); }, 600);
         });
+        GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', function () {
+            // Async and long-running; nothing awaits it, so swallow rejections
+            // here or an unexpected throw surfaces only as an unhandled
+            // rejection in the console.
+            backupCurrentFolder().catch(function (e) {
+                warn('backup run threw', e);
+                toast('备份失败：' + (e && e.message), 'err');
+            });
+        });
+        GM_registerMenuCommand('fav-fix：查看备份状态', showBackupStatus);
         GM_registerMenuCommand('fav-fix：查看登录状态', function () {
             var a = getAuth();
             var age = a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null;

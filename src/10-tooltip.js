@@ -103,6 +103,7 @@
     // Source attribution chips. Color-coded per source so the user can
     // see at a glance which API contributed which field of the snapshot.
     var SOURCE_COLORS = {
+        backup:    '#8e44ad',
         android:   '#5b8def',
         'public':  '#67c23a',
         biliplus:  '#e6a23c',

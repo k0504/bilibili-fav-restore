@@ -71,7 +71,9 @@
                 // spinner would hang forever. 4s is generous for
                 // hdslb but short enough to not feel broken.
                 setTimeout(finish, 4000);
-                patchCover(img, real.cover);
+                // Third arg = av: lets patchCover fall back to the local
+                // backup's cover Blob if this URL 404s (09-dom.js).
+                patchCover(img, real.cover, real.oid != null ? String(real.oid) : null);
             })(hit.img, hit);
         } else {
             // Either no real.cover (rare — source returned title
@@ -84,6 +86,65 @@
         if (real.title) patchTitle(hit.container, real.title);
         markPatched(hit, real);
         return 'patched';
+    }
+
+    // ─── Credential-less restore ────────────────────────────────────────
+    // Avs this pass already looked up locally and found nothing for. Without it
+    // every observer tick would re-open an IndexedDB transaction per unpatched
+    // card. Folder-scoped: dropAllInMemory() clears it (13-missing.js), and so
+    // does a backup run, which is the one thing that can turn a miss into a hit
+    // without a page load.
+    var _localOnlyMiss = new Set();
+
+    // Runs INSTEAD of the resolver when there is no access_key. It must not
+    // touch the network (android owns every invalid-item snapshot and is
+    // appkey+token signed, so the rescue chain genuinely cannot run) and must
+    // not write the GM cache — a later logged-in resolve has to stay free to
+    // ask android and the third-party archives about whatever the local layers
+    // could not answer. Two credential-free sources are available: a merge
+    // persisted by an earlier session, and the IndexedDB backup, which was
+    // captured while the videos were still alive and needs no login at all.
+    // Before this path existed, a fully backed-up folder restored NOTHING once
+    // the user logged out.
+    async function restoreLocalOnly(hits) {
+        var todo = [];
+        var patched = 0;
+        hits.forEach(function (hit) {
+            var av = getAvFromHit(hit);
+            if (!av || _localOnlyMiss.has(av)) return;
+            var c = loadCache(av);
+            if (c) {
+                try { if (applyPatch(hit, c) === 'patched') patched++; }
+                catch (e) { warn('local-only fast-path applyPatch threw for av', av, e); }
+            } else {
+                todo.push({ hit: hit, av: av });
+            }
+        });
+        if (todo.length && SOURCES.backup && SOURCES.backup.enabled()) {
+            var avs = todo.map(function (t) { return t.av; });
+            var recs = null;
+            try { recs = await SOURCES.backup.fetchAvs(avs); }
+            catch (e) { warn('local-only backup lookup failed:', e && e.message); }
+            if (recs) {
+                todo.forEach(function (t) {
+                    var item = recs.get(t.av);
+                    if (!item) { _localOnlyMiss.add(t.av); return; }
+                    // Run it through the normal merge so the card, the tooltip
+                    // and the clipboard text see exactly the shape they see on
+                    // the logged-in path (_src_* provenance included).
+                    var real = mergeBySource({ backup: item });
+                    if (real._degenerate) { _localOnlyMiss.add(t.av); return; }
+                    real._attempted = ['backup'];
+                    try { if (applyPatch(t.hit, real) === 'patched') patched++; }
+                    catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
+                });
+            }
+        } else {
+            todo.forEach(function (t) { _localOnlyMiss.add(t.av); });
+        }
+        log('no access_key —', patched, 'of', hits.length,
+            'invalid card(s) restored from local data (GM cache + backup);',
+            'the rest need a login');
     }
 
     // Re-entrancy guard. patchOnceInner is async and a phase-1 walk can take
@@ -122,7 +183,11 @@
         if (hits.length === 0) return;
         var auth = getAuth();
         if (!auth.access_key) {
-            log(hits.length, 'invalid items on page, but no access_key — skip');
+            // No credential → the NETWORK rescue chain is unavailable, but the
+            // local layers are not: restore what the GM cache and the local
+            // backup can serve instead of leaving a fully backed-up folder
+            // untouched. Nothing below this point is reachable without a login.
+            await restoreLocalOnly(hits);
             return;
         }
         log('detected', hits.length, 'invalid items, mediaId=', mediaId);

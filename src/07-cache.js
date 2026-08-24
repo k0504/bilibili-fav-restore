@@ -11,7 +11,7 @@
     //   - changing the merged-item shape (renaming fields etc.)
 
     var CACHE_PREFIX  = 'item:av';
-    var CACHE_VERSION = 5;   // bumped: +_degenerate flag (short TTL on no-cover-no-title merges)
+    var CACHE_VERSION = 6;   // bumped: +SOURCES.backup (IndexedDB snapshots lead FIELD_PRIORITY)
     var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
     // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
     // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
@@ -32,14 +32,21 @@
             return null;
         }
         // Short TTL for any NOT-confidently-recovered entry:
-        //   _degenerate — some source returned only placeholders, or
-        //   _pending    — android may still flap the real snapshot back in
-        //                 (see runFlapRecovery in 08-resolver.js).
+        //   _degenerate    — some source returned only placeholders, or
+        //   _pending       — android may still flap the real snapshot back in
+        //                    (see runFlapRecovery in 08-resolver.js), or
+        //   _cover_pending — the title was recovered but the cover is still a
+        //                    placeholder; the card is patched, yet the flap
+        //                    loop is still chasing the image. Long-TTL locking
+        //                    here is what a title-only LOCAL BACKUP record
+        //                    (which never expires) would otherwise impose on
+        //                    every future resolve of that av.
         // Locking these for 30 days would turn a transient android walk-to-walk
         // drop into a permanent "deleted" (observed: a war-footage folder where
         // android returned 58/89 on one walk and the dropped items all fell to
         // _no_source). Only a confidently-recovered merge gets the long TTL.
-        var ttl = (v._degenerate || v._pending) ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+        var ttl = (v._degenerate || v._pending || v._cover_pending)
+                ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
@@ -49,6 +56,10 @@
         try { GM_setValue(CACHE_PREFIX + av, merged); }
         catch (e) { warn('saveCache failed for av', av, e); }
     }
+    // Note for anyone extending the clearing paths below: they clear DERIVED
+    // data (re-fetchable merges) only. The IndexedDB backup store
+    // (15a-backup.js) is user-authored data with no upstream to re-fetch from
+    // and must NEVER be dropped here.
     function clearItemCache(av) { GM_deleteValue(CACHE_PREFIX + av); }
     function clearAllItemCache() {
         if (typeof GM_listValues !== 'function') {

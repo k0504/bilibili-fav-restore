@@ -75,6 +75,56 @@
         });
     }
 
+    // Binary sibling of gmGet, for the manual backup (15a-backup.js): pulls a
+    // cover image straight into a Blob so it can be stored in IndexedDB. Kept
+    // as a separate function rather than a flag on gmGet because gmGet's whole
+    // contract is "resolves to parsed JSON" and every caller depends on it.
+    // Same client-side Promise.race guard, same reason (GM's own `timeout`
+    // never fires on a connection that stalls mid-handshake).
+    function gmGetBlob(url, opts) {
+        opts = opts || {};
+        var timeoutMs = opts.timeout || 10000;
+        var underlying = new Promise(function (resolve, reject) {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                responseType: 'blob',
+                // hdslb serves covers without a Referer check today, but send
+                // one anyway — a hotlink guard would otherwise turn every
+                // backup into "封面失败 N".
+                headers: opts.headers || { 'Referer': 'https://www.bilibili.com/' },
+                timeout: timeoutMs,
+                onload: function (resp) {
+                    if (resp.status && (resp.status < 200 || resp.status >= 300)) {
+                        reject(new Error('HTTP ' + resp.status + ': ' + url));
+                        return;
+                    }
+                    var b = resp.response;
+                    // Duck-typed, NOT `instanceof Blob`: the Blob is minted in
+                    // the GM sandbox realm, whose Blob constructor is not
+                    // necessarily the one visible here — instanceof can be
+                    // false for a perfectly good Blob.
+                    if (!b || typeof b.size !== 'number' || !b.size) {
+                        reject(new Error('empty/non-blob response (status=' + resp.status + '): ' + url));
+                        return;
+                    }
+                    resolve(b);
+                },
+                onerror: function () { reject(new Error('network error: ' + url)); },
+                ontimeout: function () { reject(new Error('timeout: ' + url)); }
+            });
+        });
+        var guardTimer = null;
+        var guard = new Promise(function (_, rej) {
+            guardTimer = setTimeout(function () {
+                rej(new Error('client-side timeout (' + timeoutMs + 'ms+500): ' + url));
+            }, timeoutMs + 500);
+        });
+        return Promise.race([underlying, guard]).finally(function () {
+            if (guardTimer) clearTimeout(guardTimer);
+        });
+    }
+
     function gmPostForm(url, body) {
         return gmGet(url, {
             method: 'POST',

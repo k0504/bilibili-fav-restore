@@ -38,7 +38,12 @@
         // avs. The loop itself bails on detectMediaId() mismatch, but clearing
         // here keeps kickManualRetry's leftover lookup honest.
         _flapLeftover.clear();
+        _flapLeftoverCover.clear();
         _flapLeftoverMid = null;
+        // Same reasoning for the credential-less restore path's negative memo
+        // (14-orchestrate.js): it records "no local data for this av", which is
+        // only meaningful for the folder currently on screen.
+        _localOnlyMiss.clear();
     }
 
     async function fetchAllAvList(mediaId) {

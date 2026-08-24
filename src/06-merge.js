@@ -39,28 +39,33 @@
     };
 
     // Priority order: source name LEFT wins if its value passes QUALITY.
+    // `backup` (15a-backup.js) leads every field it supplies: it is the only
+    // source captured while the video was still ALIVE, so its snapshot beats
+    // any post-mortem one by construction. It is absent from attr / link /
+    // playback_desc on purpose — those describe the item's CURRENT state and
+    // must come from a live source.
     // 3rd-party archives (biliplus / jijidown) carry only title/cover/
     // upper.name — they're the last-resort fallback for items even the
     // Android-app snapshot couldn't save.
     var FIELD_PRIORITY = {
         // Android endpoint preserves invalid-item snapshots for these.
-        cover:    ['android', 'public', 'biliplus', 'jijidown'],
-        title:    ['android', 'public', 'biliplus', 'jijidown'],
-        upper:    ['android', 'public', 'biliplus', 'jijidown'],
-        intro:    ['android', 'public'],
-        duration: ['android', 'public'],
+        cover:    ['backup', 'android', 'public', 'biliplus', 'jijidown'],
+        title:    ['backup', 'android', 'public', 'biliplus', 'jijidown'],
+        upper:    ['backup', 'android', 'public', 'biliplus', 'jijidown'],
+        intro:    ['backup', 'android', 'public'],
+        duration: ['backup', 'android', 'public'],
         playback_desc: ['android', 'public'],
         attr:     ['android', 'public'],
         link:     ['android', 'public'],
-        bvid:     ['public', 'android'],
+        bvid:     ['backup', 'public', 'android'],
         // Public endpoint has these; Android omits them for invalid items:
-        cnt_info: ['public',  'android'],
-        pubtime:  ['public'],
-        ctime:    ['public',  'android'],
-        fav_time: ['public'],
-        tid:      ['public'],
-        pages:    ['public'],
-        page:     ['public',  'android']
+        cnt_info: ['backup', 'public',  'android'],
+        pubtime:  ['backup', 'public'],
+        ctime:    ['backup', 'public',  'android'],
+        fav_time: ['backup', 'public'],
+        tid:      ['backup', 'public'],
+        pages:    ['backup', 'public'],
+        page:     ['backup', 'public',  'android']
     };
 
     function mergeBySource(perSource) {

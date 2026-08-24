@@ -58,6 +58,7 @@ MANIFEST = [
     '13-missing.js',        # silently-dropped item recovery + banner
     '14-orchestrate.js',    # applyPatch, patchOnce, schedule, MutationObserver
     '15-toast.js',          # bottom-center toast
+    '15a-backup.js',        # IndexedDB backup store + walker + SOURCES.backup
     '16-menu-commands.js',  # GM_registerMenuCommand wiring
     '17-boot.js',           # boot + __biliFavFix debug surface + IIFE close
 ]

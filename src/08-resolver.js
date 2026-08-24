@@ -78,6 +78,28 @@
             attemptedPerAv.get(av).add(src);
         }
 
+        // ─── Phase 0: local backup (IndexedDB) ───────────────────────
+        // The manual backup (15a-backup.js) is the only source that captured
+        // the item while it was still ALIVE, so it runs before anything on the
+        // network and leads FIELD_PRIORITY. A hit here cascades: the av passes
+        // hasGoodCoverAndTitle, so phase 2 never spends budget on third-party
+        // archives for it, and the merge is neither _degenerate nor _pending,
+        // so the background flap loop never chases it. Every todoAv is marked
+        // attempted — a miss is a real "已查询但无记录" answer, exactly like a
+        // paginated source whose page didn't list the av. A broken or blocked
+        // IDB must never take the resolver down: warn and fall through to the
+        // network sources.
+        if (SOURCES.backup && SOURCES.backup.enabled()) {
+            todoAvs.forEach(function (av) { markAttempted(av, 'backup'); });
+            try {
+                var backupHits = await SOURCES.backup.fetchAvs(todoAvs);
+                backupHits.forEach(function (item, av) { pageItems.set('backup|' + av, item); });
+                if (backupHits.size) log('phase 0: backup covered', backupHits.size, 'of', todoAvs.length);
+            } catch (e) {
+                warn('phase 0 backup lookup failed:', e && e.message);
+            }
+        }
+
         // ─── Phase 1: paginated sources (android, public) ────────────
         // Walk pages of each enabled paginated source until every todoAv
         // appears or we hit MAX_PN. Page Promises are deduped by ensurePage.
@@ -133,6 +155,7 @@
             var src = srcOrder[s];
             var def = SOURCES[src];
             if (def.paginated)   continue;
+            if (src === 'backup') continue;   // local, already queried in phase 0
             if (!def.enabled()) {
                 // Most commonly this means the source is in the backoff
                 // window (sourceFailureGate.isOpen returned false). Loud
@@ -213,6 +236,18 @@
                 // Degenerate (placeholders only) but android could still recover
                 // it on a later walk → keep retriable instead of stuck.
                 if (rec._degenerate && androidUp) rec._pending = true;
+                // Title recovered, cover still missing / a placeholder. NOT
+                // _pending — the title is real and belongs on the card right
+                // now — but not settled either: android flaps covers exactly as
+                // it flaps whole rows. Flag it so loadCache keeps the short
+                // staleness TTL and the background loop keeps sampling for the
+                // image (holding out for a COVER, not retiring on the title it
+                // already has). Without this, a title-only merge locks the card
+                // to its placeholder cover for 30 days — and a title-only local
+                // BACKUP record, which never expires, would re-impose that lock
+                // on every later resolve, permanently disabling the only retry
+                // path the system has.
+                else if (androidUp && rec._src_title && !rec._src_cover) rec._cover_pending = true;
                 log('av', av, 'merged from {' + Object.keys(perSource).join(',') + '}',
                     attempted ? '(attempted: ' + Array.from(attempted).join(',') + ')' : '',
                     '→', 'cover=' + (rec._src_cover || '·'),
@@ -235,13 +270,19 @@
         // forget: the caller paints from `result` immediately; recovered cards
         // are re-patched in place as each walk lands (they stay "已失效视频" so
         // findInvalidContainers keeps finding them until upgraded).
+        // `_cover_pending` avs join the same loop but with a stricter promotion
+        // test (they already have a title; only a cover retires them).
         if (androidUp) {
-            var bgCandidates = todoAvs.filter(function (av) {
+            var bgCandidates = [];
+            var bgCoverOnly  = [];
+            todoAvs.forEach(function (av) {
                 var m = result.get(av);
-                return m && m._pending;
+                if (!m) return;
+                if (m._pending) bgCandidates.push(av);
+                else if (m._cover_pending) { bgCandidates.push(av); bgCoverOnly.push(av); }
             });
             if (bgCandidates.length) {
-                runFlapRecovery(mediaId, bgCandidates)
+                runFlapRecovery(mediaId, bgCandidates, bgCoverOnly)
                     .catch(function (e) { warn('flap-bg threw:', e && e.message); });
             }
         }
@@ -265,6 +306,13 @@
     // the loop concludes the leftovers are genuinely filtered and stops. So a
     // still-flapping folder is sampled fast and converges; a truly-deleted set
     // is abandoned after ~7 cheap samples (~4 min) instead of being hammered.
+    //
+    // Two kinds of candidate share the loop: `_pending` avs (nothing usable yet
+    // — any cover OR title retires them) and `_cover_pending` avs (title already
+    // patched onto the card, only the image missing — nothing but a cover
+    // retires them). The caller passes the latter as `coverNeeded`; without that
+    // distinction the title they already have would retire them on walk 1 and
+    // the cover would never be chased.
     //
     // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
     // merge and call schedule(). The still-pending cards remain detectable by
@@ -304,8 +352,12 @@
     // leftover set in one walk instead of chasing a single av. Scoped to one
     // folder via _flapLeftoverMid; cleared on folder switch (dropAllInMemory).
     var _flapLeftover = new Set();
+    // Subset of _flapLeftover whose retry is about the COVER only (the title is
+    // already patched onto the card). Kept apart so a manual re-arm restores the
+    // same promotion rule instead of retiring them on the first walk.
+    var _flapLeftoverCover = new Set();
     var _flapLeftoverMid = null;
-    async function runFlapRecovery(mediaId, candidates) {
+    async function runFlapRecovery(mediaId, candidates, coverNeeded) {
         if (_flapBgRunning) return;
         if (!candidates || !candidates.length) return;
         if (!SOURCES.android.enabled()) return;
@@ -315,6 +367,12 @@
         // a MANUAL re-arm has nothing else to repaint the cards.
         schedule();
         var pending = new Set(candidates.map(String));
+        // Avs enqueued because their COVER is missing while the title is
+        // already good (`_cover_pending`). The default promotion test below
+        // (!_degenerate) is already satisfied by that title, so it would retire
+        // them after one walk without ever obtaining the image — for these the
+        // merge has to actually carry a cover.
+        var needCover = new Set((coverNeeded || []).map(String));
         var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
         var walk = 0, dry = 0;
         _flapProgress = {
@@ -364,7 +422,10 @@
                         if (it) perSource[s] = it;
                     });
                     var merged = mergeBySource(perSource);
-                    if (merged._degenerate) return;   // still no good cover/title — keep trying
+                    // Keep trying while the walk has not produced what this av
+                    // was enqueued for: a cover for the _cover_pending set, any
+                    // usable cover-or-title for everyone else.
+                    if (needCover.has(av) ? !merged._src_cover : merged._degenerate) return;
                     saveCache(av, merged);
                     pending.delete(av);
                     recovered.push(av);
@@ -408,6 +469,8 @@
             // If the loop recovered everything, pending is empty → no leftover →
             // the retry menu item won't render (cards are no longer _pending).
             _flapLeftover = new Set(pending);
+            _flapLeftoverCover = new Set();
+            pending.forEach(function (av) { if (needCover.has(av)) _flapLeftoverCover.add(av); });
             _flapLeftoverMid = mediaId;
             // Re-run the patch pass with the loop now inactive so any still-
             // pending cards flip their badge from "重试中" to "待重试".
@@ -427,10 +490,14 @@
         if (!mid) { toast('无法识别当前收藏夹', 'warn'); return; }
         if (!SOURCES.android.enabled()) { toast('android 接口不可用，无法重试', 'warn'); return; }
         if (_flapBgRunning) { toast('后台正在重试中，请稍候', 'ok'); return; }
-        var cands = (_flapLeftoverMid === mid) ? Array.from(_flapLeftover) : [];
-        if (!cands.length && clickedAv) cands = [String(clickedAv)];
+        var sameFolder = (_flapLeftoverMid === mid);
+        var cands     = sameFolder ? Array.from(_flapLeftover)      : [];
+        var coverOnly = sameFolder ? Array.from(_flapLeftoverCover) : [];
+        if (!cands.length && clickedAv) { cands = [String(clickedAv)]; coverOnly = []; }
         if (!cands.length) { toast('没有待重试的视频', 'ok'); return; }
-        toast('正在重新抓取 ' + cands.length + ' 项待重试视频', 'ok');
-        runFlapRecovery(mid, cands).catch(function (e) { warn('manual retry threw:', e); });
+        // The leftover set can also hold cards that ARE patched and only lack a
+        // cover, so the wording is deliberately not "待重试" alone.
+        toast('正在重新抓取 ' + cands.length + ' 项未完全还原的视频', 'ok');
+        runFlapRecovery(mid, cands, coverOnly).catch(function (e) { warn('manual retry threw:', e); });
     }
 
