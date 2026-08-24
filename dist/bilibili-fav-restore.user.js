@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.11.2
+// @version      0.11.3
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.2)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.3)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.11.2';
+    var CORE_VERSION = '0.11.3';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -3936,7 +3936,7 @@
     }
 
     // The meta record is the ONLY per-folder answer to "when was this folder
-    // last backed up in full", and 查看备份状态 reads it. An aborted walk must
+    // last backed up in full"; the manager panel's footer reads it. An aborted walk must
     // therefore not overwrite a previous COMPLETE run's figures with its own
     // truncated ones — that would report a 40-of-300 failure as a fresh 40-item
     // backup and hide the fact that the folder still needs a full pass. Keep
@@ -4005,31 +4005,10 @@
         return out;
     }
 
-    // Menu-facing wrapper: same single-line concatenated style as
-    // "查看登录状态" so the toast stays one readable band.
-    function showBackupStatus() {
-        backupStatus().then(function (s) {
-            var last = '未备份';
-            if (s.folder && s.folder.last_run) {
-                var days = Math.floor((Date.now() - s.folder.last_run) / 86400000);
-                last = (days <= 0 ? '今天' : days + ' 天前')
-                     + '（' + (s.folder.total_seen || 0) + ' 项）';
-            }
-            // last_run describes the last COMPLETE pass; an aborted attempt is
-            // recorded separately so the folder is not reported as up to date.
-            if (s.folder && s.folder.last_attempt_partial) {
-                last += ' · 上次备份中止于第 ' + (s.folder.last_attempt_page || 0) + ' 页';
-            }
-            var quota = (s.quotaUsed == null) ? '未知'
-                      : fmtBytes(s.quotaUsed) + ' / ' + fmtBytes(s.quota);
-            toast('备份条目：' + s.items + ' 项'
-                  + '　封面：' + s.withCover + ' 张 / ' + fmtBytes(s.coverBytes)
-                  + '　浏览器存储：' + quota
-                  + '　本收藏夹：' + last);
-        }).catch(function (e) {
-            toast('读取备份状态失败：' + (e && e.message), 'err');
-        });
-    }
+    // (The old 查看备份状态 menu toast was folded into the manager panel:
+    // global totals + browser quota live in the panel header, per-folder
+    // last-run info in its footer. backupStatus() stays for the debug
+    // surface — __biliFavFix.backup.status().)
 
     // ─── Cover fallback for the DOM layer ───────────────────────────────
     // Used by patchCover (09-dom.js) when the recovered cover URL 404s: the
@@ -4113,8 +4092,8 @@
     //     drops all three; the caller drops pageCache once per batch.
     //   - The `meta` store is deliberately left alone. It records "when was
     //     this folder last walked in full", which stays true after individual
-    //     items are pruned — and showBackupStatus reads live counts from
-    //     idbCount anyway, so nothing here is a stale counter.
+    //     items are pruned — and the panel header / backupStatus() read live
+    //     counts from the items store anyway, so nothing here is a stale counter.
     //   - Cover Blobs in Chromium are file-backed lazy handles: a cursor walk
     //     does NOT pull the bytes into memory, but a reference held in a JS
     //     index would pin them. The in-memory index below therefore copies
@@ -4270,6 +4249,7 @@
     // falls back to '收藏夹 <id>' at render time.
     function mgrBuildFolderNames() {
         var names = new Map();
+        var metas = new Map();   // media_id → full meta record, for the footer's last-run readout
         try {
             var items = document.querySelectorAll('div.fav-sidebar-item[id]');
             for (var i = 0; i < items.length; i++) {
@@ -4280,8 +4260,27 @@
             }
         } catch (e) { /* sidebar layout changed — raw ids still render */ }
         return idbCursorEach(BACKUP_STORE_META, function (rec) {
-            if (rec && rec.media_id && rec.title) names.set(String(rec.media_id), rec.title);
-        }).then(function () { return names; }, function () { return names; });
+            if (!rec || !rec.media_id) return;
+            metas.set(String(rec.media_id), rec);
+            if (rec.title) names.set(String(rec.media_id), rec.title);
+        }).then(function () { return { names: names, metas: metas }; },
+                function () { return { names: names, metas: metas }; });
+    }
+
+    // Per-folder last-run readout, shown in the footer while that folder is
+    // selected (absorbed from the old 查看备份状态 menu toast). last_run is the
+    // last COMPLETE pass; an aborted attempt is flagged beside it so a
+    // 40-of-300 failure never reads as an up-to-date folder.
+    function mgrFolderMetaText() {
+        var s = _mgrState;
+        if (s.folder === '*') return '';
+        var m = s.metas.get(String(s.folder));
+        if (!m || !m.last_run) return ' · 未完整备份过';
+        var days = Math.floor((Date.now() - m.last_run) / 86400000);
+        var txt = ' · 上次备份：' + (days <= 0 ? '今天' : days + ' 天前')
+                + '（' + (m.total_seen || 0) + ' 项）';
+        if (m.last_attempt_partial) txt += ' · 上次尝试中止于第 ' + (m.last_attempt_page || 0) + ' 页';
+        return txt;
     }
 
     // Three-layer delete (see the header invariants). pageCache is NOT cleared
@@ -4341,7 +4340,21 @@
         var s = _mgrState;
         var t = mgrTotals(s.index);
         s.els.stat.textContent = '共 ' + t.items + ' 项 · 封面 ' + t.covers
-                               + ' 张 / ' + fmtBytes(t.bytes);
+                               + ' 张 / ' + fmtBytes(t.bytes)
+                               + (s.quotaText ? ' · 浏览器存储 ' + s.quotaText : '');
+    }
+
+    // Browser-quota readout for the header (absorbed from the old status
+    // toast). Refreshed on open and after an in-panel backup; a delete's
+    // effect on usage is small and picked up on the next open.
+    function mgrLoadQuota() {
+        var s = _mgrState;
+        if (!s || !navigator.storage || !navigator.storage.estimate) return Promise.resolve();
+        return navigator.storage.estimate().then(function (est) {
+            if (_mgrState !== s || !est) return;
+            s.quotaText = fmtBytes(est.usage || 0) + ' / ' + fmtBytes(est.quota || 0);
+            mgrRenderHead();
+        }).catch(function () { /* header simply omits the quota */ });
     }
 
     // Options are the UNION of media_ids across the index, each with its own
@@ -4461,7 +4474,7 @@
         if (pending.length) mgrLoadThumbs(pending);
 
         s.els.pageInfo.textContent = '第 ' + (total ? s.page : 0) + ' / ' + (total ? pages : 0)
-                                   + ' 页 · 共 ' + total + ' 项';
+                                   + ' 页 · 共 ' + total + ' 项' + mgrFolderMetaText();
         s.els.prev.disabled = s.busy || s.page <= 1;
         s.els.next.disabled = s.busy || s.page >= pages;
         // Both write paths (delete, in-panel backup) mutually exclude each
@@ -4544,7 +4557,9 @@
         return Promise.all([buildBackupIndex(), mgrBuildFolderNames()]).then(function (res) {
             if (_mgrState !== s) return;
             s.index = res[0];
-            s.names = res[1];
+            s.names = res[1].names;
+            s.metas = res[1].metas;
+            mgrLoadQuota();
             mgrResyncSearch();
             mgrRenderHead();
             mgrRenderFolders();
@@ -4697,7 +4712,7 @@
             _mgrState = {
                 index: [], filtered: [], page: 1, query: '', folder: '*',
                 sort: 'fav_desc',
-                names: new Map(),
+                names: new Map(), metas: new Map(), quotaText: null,
                 currentMid: detectMediaId(),
                 urls: [], renderToken: 0, busy: false, backupBusy: false,
                 searchTimer: null,
@@ -4796,10 +4811,10 @@
                 s.page++; mgrRenderList();
             });
 
-            var index, names;
+            var index, layers;
             try {
                 index = await buildBackupIndex();
-                names = await mgrBuildFolderNames();
+                layers = await mgrBuildFolderNames();
             }
             catch (e) {
                 warn('mgr: index build failed', e);
@@ -4809,11 +4824,13 @@
             }
             if (_mgrState !== s) return;   // closed while the cursor was walking
             s.index = index;
-            s.names = names;
+            s.names = layers.names;
+            s.metas = layers.metas;
             mgrRenderHead();
             mgrRenderFolders();
             mgrApplyFilter();
             mgrRenderList();
+            mgrLoadQuota();
             s.els.search.focus();
         } finally {
             _mgrOpening = false;
@@ -4861,7 +4878,6 @@
                 toast('备份失败：' + (e && e.message), 'err');
             });
         });
-        GM_registerMenuCommand('fav-fix：查看备份状态', showBackupStatus);
         GM_registerMenuCommand('fav-fix：管理备份', function () {
             // Same swallow-the-rejection reasoning as the backup run above:
             // the panel opens asynchronously (IndexedDB probe + index walk)

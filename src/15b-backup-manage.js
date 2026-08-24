@@ -15,8 +15,8 @@
     //     drops all three; the caller drops pageCache once per batch.
     //   - The `meta` store is deliberately left alone. It records "when was
     //     this folder last walked in full", which stays true after individual
-    //     items are pruned — and showBackupStatus reads live counts from
-    //     idbCount anyway, so nothing here is a stale counter.
+    //     items are pruned — and the panel header / backupStatus() read live
+    //     counts from the items store anyway, so nothing here is a stale counter.
     //   - Cover Blobs in Chromium are file-backed lazy handles: a cursor walk
     //     does NOT pull the bytes into memory, but a reference held in a JS
     //     index would pin them. The in-memory index below therefore copies
@@ -172,6 +172,7 @@
     // falls back to '收藏夹 <id>' at render time.
     function mgrBuildFolderNames() {
         var names = new Map();
+        var metas = new Map();   // media_id → full meta record, for the footer's last-run readout
         try {
             var items = document.querySelectorAll('div.fav-sidebar-item[id]');
             for (var i = 0; i < items.length; i++) {
@@ -182,8 +183,27 @@
             }
         } catch (e) { /* sidebar layout changed — raw ids still render */ }
         return idbCursorEach(BACKUP_STORE_META, function (rec) {
-            if (rec && rec.media_id && rec.title) names.set(String(rec.media_id), rec.title);
-        }).then(function () { return names; }, function () { return names; });
+            if (!rec || !rec.media_id) return;
+            metas.set(String(rec.media_id), rec);
+            if (rec.title) names.set(String(rec.media_id), rec.title);
+        }).then(function () { return { names: names, metas: metas }; },
+                function () { return { names: names, metas: metas }; });
+    }
+
+    // Per-folder last-run readout, shown in the footer while that folder is
+    // selected (absorbed from the old 查看备份状态 menu toast). last_run is the
+    // last COMPLETE pass; an aborted attempt is flagged beside it so a
+    // 40-of-300 failure never reads as an up-to-date folder.
+    function mgrFolderMetaText() {
+        var s = _mgrState;
+        if (s.folder === '*') return '';
+        var m = s.metas.get(String(s.folder));
+        if (!m || !m.last_run) return ' · 未完整备份过';
+        var days = Math.floor((Date.now() - m.last_run) / 86400000);
+        var txt = ' · 上次备份：' + (days <= 0 ? '今天' : days + ' 天前')
+                + '（' + (m.total_seen || 0) + ' 项）';
+        if (m.last_attempt_partial) txt += ' · 上次尝试中止于第 ' + (m.last_attempt_page || 0) + ' 页';
+        return txt;
     }
 
     // Three-layer delete (see the header invariants). pageCache is NOT cleared
@@ -243,7 +263,21 @@
         var s = _mgrState;
         var t = mgrTotals(s.index);
         s.els.stat.textContent = '共 ' + t.items + ' 项 · 封面 ' + t.covers
-                               + ' 张 / ' + fmtBytes(t.bytes);
+                               + ' 张 / ' + fmtBytes(t.bytes)
+                               + (s.quotaText ? ' · 浏览器存储 ' + s.quotaText : '');
+    }
+
+    // Browser-quota readout for the header (absorbed from the old status
+    // toast). Refreshed on open and after an in-panel backup; a delete's
+    // effect on usage is small and picked up on the next open.
+    function mgrLoadQuota() {
+        var s = _mgrState;
+        if (!s || !navigator.storage || !navigator.storage.estimate) return Promise.resolve();
+        return navigator.storage.estimate().then(function (est) {
+            if (_mgrState !== s || !est) return;
+            s.quotaText = fmtBytes(est.usage || 0) + ' / ' + fmtBytes(est.quota || 0);
+            mgrRenderHead();
+        }).catch(function () { /* header simply omits the quota */ });
     }
 
     // Options are the UNION of media_ids across the index, each with its own
@@ -363,7 +397,7 @@
         if (pending.length) mgrLoadThumbs(pending);
 
         s.els.pageInfo.textContent = '第 ' + (total ? s.page : 0) + ' / ' + (total ? pages : 0)
-                                   + ' 页 · 共 ' + total + ' 项';
+                                   + ' 页 · 共 ' + total + ' 项' + mgrFolderMetaText();
         s.els.prev.disabled = s.busy || s.page <= 1;
         s.els.next.disabled = s.busy || s.page >= pages;
         // Both write paths (delete, in-panel backup) mutually exclude each
@@ -446,7 +480,9 @@
         return Promise.all([buildBackupIndex(), mgrBuildFolderNames()]).then(function (res) {
             if (_mgrState !== s) return;
             s.index = res[0];
-            s.names = res[1];
+            s.names = res[1].names;
+            s.metas = res[1].metas;
+            mgrLoadQuota();
             mgrResyncSearch();
             mgrRenderHead();
             mgrRenderFolders();
@@ -599,7 +635,7 @@
             _mgrState = {
                 index: [], filtered: [], page: 1, query: '', folder: '*',
                 sort: 'fav_desc',
-                names: new Map(),
+                names: new Map(), metas: new Map(), quotaText: null,
                 currentMid: detectMediaId(),
                 urls: [], renderToken: 0, busy: false, backupBusy: false,
                 searchTimer: null,
@@ -698,10 +734,10 @@
                 s.page++; mgrRenderList();
             });
 
-            var index, names;
+            var index, layers;
             try {
                 index = await buildBackupIndex();
-                names = await mgrBuildFolderNames();
+                layers = await mgrBuildFolderNames();
             }
             catch (e) {
                 warn('mgr: index build failed', e);
@@ -711,11 +747,13 @@
             }
             if (_mgrState !== s) return;   // closed while the cursor was walking
             s.index = index;
-            s.names = names;
+            s.names = layers.names;
+            s.metas = layers.metas;
             mgrRenderHead();
             mgrRenderFolders();
             mgrApplyFilter();
             mgrRenderList();
+            mgrLoadQuota();
             s.els.search.focus();
         } finally {
             _mgrOpening = false;

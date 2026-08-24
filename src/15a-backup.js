@@ -437,7 +437,7 @@
     }
 
     // The meta record is the ONLY per-folder answer to "when was this folder
-    // last backed up in full", and 查看备份状态 reads it. An aborted walk must
+    // last backed up in full"; the manager panel's footer reads it. An aborted walk must
     // therefore not overwrite a previous COMPLETE run's figures with its own
     // truncated ones — that would report a 40-of-300 failure as a fresh 40-item
     // backup and hide the fact that the folder still needs a full pass. Keep
@@ -506,31 +506,10 @@
         return out;
     }
 
-    // Menu-facing wrapper: same single-line concatenated style as
-    // "查看登录状态" so the toast stays one readable band.
-    function showBackupStatus() {
-        backupStatus().then(function (s) {
-            var last = '未备份';
-            if (s.folder && s.folder.last_run) {
-                var days = Math.floor((Date.now() - s.folder.last_run) / 86400000);
-                last = (days <= 0 ? '今天' : days + ' 天前')
-                     + '（' + (s.folder.total_seen || 0) + ' 项）';
-            }
-            // last_run describes the last COMPLETE pass; an aborted attempt is
-            // recorded separately so the folder is not reported as up to date.
-            if (s.folder && s.folder.last_attempt_partial) {
-                last += ' · 上次备份中止于第 ' + (s.folder.last_attempt_page || 0) + ' 页';
-            }
-            var quota = (s.quotaUsed == null) ? '未知'
-                      : fmtBytes(s.quotaUsed) + ' / ' + fmtBytes(s.quota);
-            toast('备份条目：' + s.items + ' 项'
-                  + '　封面：' + s.withCover + ' 张 / ' + fmtBytes(s.coverBytes)
-                  + '　浏览器存储：' + quota
-                  + '　本收藏夹：' + last);
-        }).catch(function (e) {
-            toast('读取备份状态失败：' + (e && e.message), 'err');
-        });
-    }
+    // (The old 查看备份状态 menu toast was folded into the manager panel:
+    // global totals + browser quota live in the panel header, per-folder
+    // last-run info in its footer. backupStatus() stays for the debug
+    // surface — __biliFavFix.backup.status().)
 
     // ─── Cover fallback for the DOM layer ───────────────────────────────
     // Used by patchCover (09-dom.js) when the recovered cover URL 404s: the

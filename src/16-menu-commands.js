@@ -40,7 +40,6 @@
                 toast('备份失败：' + (e && e.message), 'err');
             });
         });
-        GM_registerMenuCommand('fav-fix：查看备份状态', showBackupStatus);
         GM_registerMenuCommand('fav-fix：管理备份', function () {
             // Same swallow-the-rejection reasoning as the backup run above:
             // the panel opens asynchronously (IndexedDB probe + index walk)
