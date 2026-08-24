@@ -41,6 +41,15 @@
             });
         });
         GM_registerMenuCommand('fav-fix：查看备份状态', showBackupStatus);
+        GM_registerMenuCommand('fav-fix：管理备份', function () {
+            // Same swallow-the-rejection reasoning as the backup run above:
+            // the panel opens asynchronously (IndexedDB probe + index walk)
+            // and nothing awaits it here.
+            openBackupManager().catch(function (e) {
+                warn('backup manager threw', e);
+                toast('打开备份管理失败：' + (e && e.message), 'err');
+            });
+        });
         GM_registerMenuCommand('fav-fix：查看登录状态', function () {
             var a = getAuth();
             var age = a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null;

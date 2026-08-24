@@ -102,6 +102,18 @@
         });
     }
 
+    // Deletion lives in the storage layer next to get/put, but it is NEVER
+    // called by any cache-clearing path (see the invariants at the top of this
+    // file). Its only caller is the backup manager panel (15b), where the user
+    // explicitly asks for a record to go away — and that caller must also drop
+    // the two derived layers keyed off the same av, or the deleted snapshot
+    // keeps restoring cards. See AGENTS.md gotcha 20.
+    function idbDelete(store, key) {
+        return backupDb().then(function (db) {
+            return idbReq(db.transaction(store, 'readwrite').objectStore(store).delete(key));
+        });
+    }
+
     function idbCount(store) {
         return backupDb().then(function (db) {
             return idbReq(db.transaction(store, 'readonly').objectStore(store).count());

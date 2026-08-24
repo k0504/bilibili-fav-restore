@@ -131,10 +131,11 @@
         },
         // Manual IndexedDB backup (15a-backup.js). run() walks the current
         // folder and stores metadata + cover Blobs; status() reports item
-        // count, cover bytes, browser quota and this folder's last run. Same
-        // pair the two Tampermonkey menu commands drive, exposed here so the
+        // count, cover bytes, browser quota and this folder's last run.
+        // manage() opens the in-page browse/delete panel (15b-backup-manage.js).
+        // Same trio the Tampermonkey menu commands drive, exposed here so the
         // whole flow can be verified from the console.
-        backup: { run: backupCurrentFolder, status: backupStatus },
+        backup: { run: backupCurrentFolder, status: backupStatus, manage: openBackupManager },
         // Missing-item recovery (task #15): inspection + manual trigger
         fetchAllAvList: fetchAllAvList,
         fetchFullPhase1Avs: fetchFullPhase1Avs,
@@ -164,6 +165,7 @@
                 '__biliFavFix.forceRefetch(bvOrAv) drop one item cache + re-patch',
                 '__biliFavFix.backup.run()         back up this folder (metadata + covers) to IndexedDB',
                 '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
+                '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',
                 '__biliFavFix.bvToAv(bv) / avToBv(av)'
