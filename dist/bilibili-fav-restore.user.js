@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.11.3
+// @version      0.11.5
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.3)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.5)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.11.3';
+    var CORE_VERSION = '0.11.5';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -4114,52 +4114,99 @@
     function ensureBackupManagerStyles() {
         if (_mgrStylesInjected) return;
         _mgrStylesInjected = true;
+        // Design language mirrors the host page (bilibili web): white panel,
+        // #fb7299 as THE accent for the single primary action, neutral grays
+        // for everything else, 6px control radii. Hierarchy over decoration:
+        //   header  = identity + global stats + primary action (备份) + close
+        //   toolbar = filters only (search, labeled 收藏夹/排序 selects)
+        //   footer  = destructive bulk delete quarantined bottom-left,
+        //             page info center, pager bottom-right
         var st = document.createElement('style');
         st.id = '__fav_fix_mgr_styles';
         st.textContent = [
+            // Font stack deliberately matches bilibili's own so the panel
+            // reads as part of the host page, not an extension bolt-on.
             '.fav-fix-mgr-overlay {',
             '  position: fixed; inset: 0; z-index: 2147483646;',
             '  display: flex; align-items: center; justify-content: center;',
-            '  background: rgba(0,0,0,.45);',
-            '  font: 13px/1.5 -apple-system,Segoe UI,sans-serif; color: #18191c;',
+            '  background: rgba(24,25,28,.5);',
+            '  font: 13px/1.5 -apple-system,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;',
+            '  color: #18191c;',
             '}',
             '.fav-fix-mgr-panel {',
             '  width: 720px; max-width: 92vw; max-height: 80vh;',
             '  display: flex; flex-direction: column;',
             '  background: #fff; border-radius: 12px; overflow: hidden;',
-            '  box-shadow: 0 8px 32px rgba(0,0,0,.3);',
+            '  box-shadow: 0 12px 40px rgba(0,0,0,.28);',
             '}',
             '.fav-fix-mgr-head {',
-            '  display: flex; align-items: center; gap: 12px;',
-            '  padding: 14px 18px; border-bottom: 1px solid #e3e5e7;',
+            '  display: flex; align-items: center; gap: 10px;',
+            '  padding: 14px 18px 12px; border-bottom: 1px solid #e3e5e7;',
             '}',
-            '.fav-fix-mgr-title { font-size: 16px; font-weight: 600; }',
-            '.fav-fix-mgr-stat { flex: 1; font-size: 12px; color: #9499a0; }',
+            '.fav-fix-mgr-headmain { flex: 1; min-width: 0; }',
+            '.fav-fix-mgr-title { font-size: 15px; font-weight: 600; line-height: 20px; }',
+            '.fav-fix-mgr-stat {',
+            '  margin-top: 2px; font-size: 12px; color: #9499a0;',
+            '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+            '}',
             '.fav-fix-mgr-tools {',
-            '  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
+            '  display: flex; align-items: center; gap: 10px;',
             '  padding: 10px 18px; border-bottom: 1px solid #f1f2f3;',
             '}',
             '.fav-fix-mgr-input {',
-            '  flex: 1; min-width: 150px; padding: 5px 10px;',
+            '  flex: 1; min-width: 140px; height: 32px; padding: 0 10px;',
             '  border: 1px solid #e3e5e7; border-radius: 6px;',
-            '  font-size: 12px; outline: none;',
+            '  font-size: 12px; outline: none; background: #fff;',
+            '  transition: border-color .15s;',
             '}',
             '.fav-fix-mgr-input:focus { border-color: #fb7299; }',
-            '.fav-fix-mgr-select {',
-            '  max-width: 240px; padding: 5px 8px;',
-            '  border: 1px solid #e3e5e7; border-radius: 6px; font-size: 12px;',
+            // Labeled select = prefix chip + borderless native select in one
+            // bordered capsule, so 收藏夹/排序 read as named controls instead
+            // of two anonymous button-looking boxes. Caret is drawn by the
+            // wrapper (::after) since appearance:none strips the native one.
+            '.fav-fix-mgr-field {',
+            '  position: relative; display: inline-flex; align-items: stretch;',
+            '  height: 32px; border: 1px solid #e3e5e7; border-radius: 6px;',
+            '  background: #fff; overflow: hidden; transition: border-color .15s;',
+            '}',
+            '.fav-fix-mgr-field:focus-within { border-color: #fb7299; }',
+            '.fav-fix-mgr-field > span {',
+            '  display: flex; align-items: center; padding: 0 8px;',
+            '  background: #f6f7f8; border-right: 1px solid #e3e5e7;',
+            '  font-size: 12px; color: #61666d; white-space: nowrap;',
+            '}',
+            '.fav-fix-mgr-field > select {',
+            '  appearance: none; -webkit-appearance: none;',
+            '  border: 0; outline: none; background: transparent;',
+            '  max-width: 190px; padding: 0 24px 0 8px;',
+            '  font-size: 12px; color: #18191c; cursor: pointer;',
+            '}',
+            '.fav-fix-mgr-field::after {',
+            '  content: ""; position: absolute; right: 9px; top: 50%;',
+            '  transform: translateY(-50%); pointer-events: none;',
+            '  border-left: 4px solid transparent; border-right: 4px solid transparent;',
+            '  border-top: 5px solid #9499a0;',
             '}',
             '.fav-fix-mgr-btn {',
-            '  border: 1px solid #e3e5e7; background: #f6f7f8; color: #18191c;',
-            '  padding: 5px 12px; border-radius: 6px; cursor: pointer;',
-            '  font: 12px/18px -apple-system,Segoe UI,sans-serif;',
+            '  height: 32px; border: 1px solid #e3e5e7; background: #fff;',
+            '  color: #18191c; padding: 0 14px; border-radius: 6px;',
+            '  cursor: pointer; font-size: 12px; white-space: nowrap;',
+            '  transition: background .15s, border-color .15s, color .15s;',
             '}',
-            '.fav-fix-mgr-btn:hover { background: #ececee; }',
+            '.fav-fix-mgr-btn:hover { background: #f6f7f8; }',
             '.fav-fix-mgr-btn[disabled] { opacity: .45; cursor: default; }',
-            '.fav-fix-mgr-btn-danger {',
-            '  border-color: #fb7299; background: #fb7299; color: #fff;',
+            // THE primary action — the only filled-pink element in the panel.
+            '.fav-fix-mgr-btn-primary {',
+            '  border-color: #fb7299; background: #fb7299; color: #fff; font-weight: 500;',
             '}',
-            '.fav-fix-mgr-btn-danger:hover { background: #e8618a; }',
+            '.fav-fix-mgr-btn-primary:hover { background: #e8618a; border-color: #e8618a; }',
+            '.fav-fix-mgr-btn-primary[disabled] { opacity: .55; }',
+            // Destructive: quiet outline until hovered — never louder than
+            // the primary action.
+            '.fav-fix-mgr-btn-danger {',
+            '  border-color: rgba(225,60,83,.4); background: #fff; color: #e13c53;',
+            '}',
+            '.fav-fix-mgr-btn-danger:hover { background: rgba(225,60,83,.06); border-color: #e13c53; }',
             '.fav-fix-mgr-body { flex: 1; min-height: 120px; overflow-y: auto; }',
             '.fav-fix-mgr-note {',
             '  padding: 48px 20px; text-align: center; color: #9499a0;',
@@ -4167,7 +4214,9 @@
             '.fav-fix-mgr-row {',
             '  display: flex; align-items: center; gap: 12px;',
             '  padding: 8px 18px; border-bottom: 1px solid #f4f5f6;',
+            '  transition: background .1s;',
             '}',
+            '.fav-fix-mgr-row:hover { background: #f8f9fb; }',
             // Fixed 96x60 box for both the real thumbnail and the placeholder,
             // so rows keep the same height whether or not a cover was archived.
             '.fav-fix-mgr-thumb, .fav-fix-mgr-noimg {',
@@ -4195,7 +4244,10 @@
             '  display: flex; align-items: center; gap: 10px;',
             '  padding: 10px 18px; border-top: 1px solid #e3e5e7;',
             '}',
-            '.fav-fix-mgr-pageinfo { flex: 1; font-size: 12px; color: #9499a0; }'
+            '.fav-fix-mgr-pageinfo {',
+            '  flex: 1; text-align: right; font-size: 12px; color: #9499a0;',
+            '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+            '}'
         ].join('\n');
         (document.head || document.documentElement).appendChild(st);
     }
@@ -4379,7 +4431,9 @@
         // select blank while s.folder kept filtering on the vanished id. Fall
         // back to 全部收藏夹 so the control and the filter still agree.
         if (s.folder !== '*' && !counts.has(s.folder)) s.folder = '*';
-        var html = '<option value="*">全部收藏夹（' + s.index.length + '）</option>';
+        // The field's own prefix chip already says 收藏夹 — option labels
+        // carry just the name and count.
+        var html = '<option value="*">全部（' + s.index.length + '）</option>';
         for (var m = 0; m < keys.length; m++) {
             var label = (s.names.get(keys[m]) || ('收藏夹 ' + keys[m]))
                       + (s.currentMid && keys[m] === String(s.currentMid) ? ' · 当前收藏夹' : '')
@@ -4681,26 +4735,32 @@
             host.innerHTML = ''
                 + '<div class="fav-fix-mgr-panel">'
                 +   '<div class="fav-fix-mgr-head">'
-                +     '<div class="fav-fix-mgr-title">备份管理</div>'
-                +     '<div class="fav-fix-mgr-stat">正在读取备份…</div>'
+                +     '<div class="fav-fix-mgr-headmain">'
+                +       '<div class="fav-fix-mgr-title">备份管理</div>'
+                +       '<div class="fav-fix-mgr-stat">正在读取备份…</div>'
+                +     '</div>'
+                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-primary fav-fix-mgr-backup">备份当前收藏夹</button>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-close">关闭</button>'
                 +   '</div>'
                 +   '<div class="fav-fix-mgr-tools">'
                 +     '<input class="fav-fix-mgr-input" type="text" placeholder="搜索标题 / BV 号 / UP 主">'
-                +     '<select class="fav-fix-mgr-select"><option value="*">全部收藏夹</option></select>'
-                +     '<select class="fav-fix-mgr-select fav-fix-mgr-sort">'
-                +       '<option value="fav_desc">最新收藏在前</option>'
-                +       '<option value="fav_asc">最早收藏在前</option>'
-                +       '<option value="backed_desc">最新备份在前</option>'
-                +       '<option value="backed_asc">最早备份在前</option>'
-                +     '</select>'
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-backup">备份当前收藏夹</button>'
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
+                +     '<label class="fav-fix-mgr-field"><span>收藏夹</span>'
+                +       '<select class="fav-fix-mgr-select"><option value="*">全部</option></select>'
+                +     '</label>'
+                +     '<label class="fav-fix-mgr-field"><span>排序</span>'
+                +       '<select class="fav-fix-mgr-select fav-fix-mgr-sort">'
+                +         '<option value="fav_desc">最新收藏在前</option>'
+                +         '<option value="fav_asc">最早收藏在前</option>'
+                +         '<option value="backed_desc">最新备份在前</option>'
+                +         '<option value="backed_asc">最早备份在前</option>'
+                +       '</select>'
+                +     '</label>'
                 +   '</div>'
                 +   '<div class="fav-fix-mgr-body">'
                 +     '<div class="fav-fix-mgr-note">正在读取备份…</div>'
                 +   '</div>'
                 +   '<div class="fav-fix-mgr-foot">'
+                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
                 +     '<div class="fav-fix-mgr-pageinfo"></div>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-prev" disabled>上一页</button>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-next" disabled>下一页</button>'
