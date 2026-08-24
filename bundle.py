@@ -60,6 +60,7 @@ MANIFEST = [
     '15-toast.js',          # bottom-center toast
     '15a-backup.js',        # IndexedDB backup store + walker + SOURCES.backup
     '15b-backup-manage.js', # in-page backup manager panel (browse + delete)
+    '15c-backup-export.js', # CRC-32 + STORE zip writer + exportBackupRows
     '16-menu-commands.js',  # GM_registerMenuCommand wiring
     '17-boot.js',           # boot + __biliFavFix debug surface + IIFE close
 ]

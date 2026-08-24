@@ -135,7 +135,25 @@
         // manage() opens the in-page browse/delete panel (15b-backup-manage.js).
         // Same trio the Tampermonkey menu commands drive, exposed here so the
         // whole flow can be verified from the console.
-        backup: { run: backupCurrentFolder, status: backupStatus, manage: openBackupManager },
+        //
+        // exportAll() is the panel's 导出筛选结果 without the panel: it indexes
+        // the WHOLE store and hands every row to the same exportBackupRows
+        // (15c-backup-export.js), so the archive can be regression-tested (open
+        // it, verify the CRCs, count the entries) with no UI in the loop. The
+        // scope sort is 'none' because a cursor walk has no view ordering to
+        // record — the panel supplies its own dropdown value instead.
+        backup: {
+            run: backupCurrentFolder,
+            status: backupStatus,
+            manage: openBackupManager,
+            exportAll: function () {
+                return buildBackupIndex().then(function (rows) {
+                    return exportBackupRows(rows, {
+                        scope: { folder: '*', folderTitle: null, query: '', sort: 'none' }
+                    });
+                });
+            }
+        },
         // Missing-item recovery (task #15): inspection + manual trigger
         fetchAllAvList: fetchAllAvList,
         fetchFullPhase1Avs: fetchFullPhase1Avs,
@@ -166,6 +184,7 @@
                 '__biliFavFix.backup.run()         back up this folder (metadata + covers) to IndexedDB',
                 '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
                 '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
+                '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',
                 '__biliFavFix.bvToAv(bv) / avToBv(av)'

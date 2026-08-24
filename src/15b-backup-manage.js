@@ -3,8 +3,9 @@
     // The IndexedDB backup (15a-backup.js) is the only USER-AUTHORED data this
     // script keeps, and until this panel existed the only way to inspect or
     // prune it was DevTools. This module is that missing surface: a single
-    // in-page overlay that lists every archived item with its cover thumbnail
-    // and provides the delete paths (one item, or the whole current filter).
+    // in-page overlay that lists every archived item with its cover thumbnail,
+    // provides the delete paths (one item, or the whole current filter) and
+    // hands the current filter to the ZIP export (15c-backup-export.js).
     //
     // Cross-file invariants (see AGENTS.md gotcha 20):
     //   - Deleting one av is a THREE-LAYER operation, not just an IDB delete.
@@ -42,7 +43,8 @@
         // for everything else, 6px control radii. Hierarchy over decoration:
         //   header  = identity + global stats + primary action (备份) + close
         //   toolbar = filters only (search, labeled 收藏夹/排序 selects)
-        //   footer  = destructive bulk delete quarantined bottom-left,
+        //   footer  = bulk actions bottom-left (neutral export first, then the
+        //             destructive bulk delete quarantined beside it),
         //             page info center, pager bottom-right
         var st = document.createElement('style');
         st.id = '__fav_fix_mgr_styles';
@@ -454,11 +456,21 @@
                                    + ' 页 · 共 ' + total + ' 项' + mgrFolderMetaText();
         s.els.prev.disabled = s.busy || s.page <= 1;
         s.els.next.disabled = s.busy || s.page >= pages;
-        // Both write paths (delete, in-panel backup) mutually exclude each
-        // other; browsing stays free during either.
-        s.els.bulk.disabled = s.busy || s.backupBusy || !total;
+        // The three long operations (delete, in-panel backup, export) mutually
+        // exclude each other; browsing stays free during all of them. The
+        // export term is `s.exportBusy || _exportRunning`, not s.exportBusy
+        // alone: an export survives the panel it was started from, so a panel
+        // opened while one is still walking has exportBusy false and must
+        // nonetheless present the matrix as locked (15c-backup-export.js).
+        s.els.bulk.disabled = s.busy || s.backupBusy || s.exportBusy || _exportRunning || !total;
         s.els.bulk.textContent = '删除当前筛选结果（' + total + ' 项）';
-        if (s.backupBusy) {
+        // The export button lives in the footer, so a re-render never rebuilds
+        // it — but its disabled state is derived from the same counters as the
+        // rows and has to be recomputed here all the same. Its LABEL is left
+        // alone: it carries no count (unlike the bulk delete), and during a run
+        // it holds the progress text that mgrExportFiltered owns.
+        s.els.exportBtn.disabled = s.busy || s.backupBusy || s.exportBusy || _exportRunning || !total;
+        if (s.backupBusy || s.exportBusy || _exportRunning) {
             var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
             for (var d = 0; d < dels.length; d++) dels[d].disabled = true;
         }
@@ -479,9 +491,26 @@
         var pages = Math.max(1, Math.ceil(s.filtered.length / MGR_PAGE_SIZE));
         s.els.prev.disabled = on || s.page <= 1;
         s.els.next.disabled = on || s.page >= pages;
-        s.els.bulk.disabled = on || !s.filtered.length;
+        s.els.bulk.disabled = on || s.backupBusy || s.exportBusy || _exportRunning || !s.filtered.length;
+        // Same computation as in mgrRenderList: a delete that ends without a
+        // re-render must not hand the export button back while another long
+        // operation still owns the panel.
+        s.els.exportBtn.disabled = on || s.backupBusy || s.exportBusy || _exportRunning || !s.filtered.length;
         var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
-        for (var i = 0; i < dels.length; i++) dels[i].disabled = on;
+        for (var i = 0; i < dels.length; i++) {
+            dels[i].disabled = on || s.backupBusy || s.exportBusy || _exportRunning;
+        }
+    }
+
+    // Called by exportBackupRows (15c-backup-export.js) once a run releases
+    // _exportRunning. Only the panel that STARTED an export repaints itself
+    // when it ends; a panel opened after that one was closed mid-run derives
+    // its locked controls from the module flag and would otherwise stay locked
+    // until some unrelated interaction happened to re-render it.
+    function mgrExportReleased() {
+        var s = _mgrState;
+        if (!s || s.exportBusy) return;   // no panel, or the owner repaints itself
+        mgrRenderList();
     }
 
     // The search box stays editable during a delete on purpose: disabling an
@@ -549,7 +578,7 @@
 
     function mgrDeleteOne(rec) {
         var s = _mgrState;
-        if (s.busy || s.backupBusy) return;
+        if (s.busy || s.backupBusy || s.exportBusy || _exportRunning) return;
         if (!confirm('确定删除该条目的备份？\n\n' + rec.title + '\n\n删除后无法恢复。')) return;
         mgrSetBusy(true);
         deleteBackupAv(rec.av).then(function () {
@@ -575,7 +604,7 @@
 
     async function mgrDeleteFiltered() {
         var s = _mgrState;
-        if (s.busy || s.backupBusy) return;
+        if (s.busy || s.backupBusy || s.exportBusy || _exportRunning) return;
         var targets = s.filtered.slice();
         if (!targets.length) return;
         var whole = (s.folder === '*' && !s.query.trim());
@@ -608,6 +637,63 @@
         mgrAfterDelete(removed);
         toast('已删除 ' + removed.size + ' 项备份'
               + (failed ? ' · 失败 ' + failed + ' 项' : ''), failed ? 'warn' : 'ok');
+    }
+
+    // Packs the current filter into a ZIP (15c-backup-export.js). Read-only,
+    // so unlike the delete paths it asks for no confirmation.
+    //
+    // The row list is SNAPSHOT at click time: the export then owns its own
+    // copy and the user may keep searching, paging and switching folders while
+    // it runs. Closing the panel mid-run does not cancel it either — the file
+    // was asked for and a read-only job has nothing to roll back — so every UI
+    // touch below is gated on the panel still being the one this run started
+    // with, while the completion toast (which does not belong to the panel)
+    // fires from exportBackupRows regardless.
+    //
+    // renderToken is deliberately NOT involved: that mechanism exists for
+    // thumbnail objectURL lifetime and means nothing here.
+    function mgrExportFiltered() {
+        var s = _mgrState;
+        if (s.busy || s.backupBusy || s.exportBusy) return;
+        var rows = s.filtered.slice();
+        if (!rows.length) return;
+
+        s.exportBusy = true;
+        s.els.exportBtn.disabled = true;
+        s.els.exportBtn.textContent = '导出中 0%';
+        mgrRenderList();
+
+        // Percent, not "N / M": the row count is already in the page info line,
+        // and repainting the label on every one of several hundred rows is
+        // wasted layout work — only a whole-number change is written back.
+        var lastPct = -1;
+        exportBackupRows(rows, {
+            scope: {
+                folder:      s.folder,
+                folderTitle: s.folder === '*' ? null : (s.names.get(String(s.folder)) || null),
+                query:       s.query,
+                sort:        s.sort
+            },
+            metas: s.metas,
+            onProgress: function (done, total) {
+                if (_mgrState !== s) return;
+                var pct = total ? Math.floor(done * 100 / total) : 100;
+                if (pct === lastPct) return;
+                lastPct = pct;
+                s.els.exportBtn.textContent = '导出中 ' + pct + '%';
+            }
+        }).catch(function (e) {
+            warn('mgr: export threw', e);
+            toast('导出失败：' + (e && e.message), 'err');
+        }).then(function () {
+            if (_mgrState !== s) return;   // panel closed mid-export
+            s.exportBusy = false;
+            s.els.exportBtn.disabled = false;
+            s.els.exportBtn.textContent = '导出筛选结果';
+            // Nothing in the store changed, so the index stands; the re-render
+            // is purely to hand the rows and the bulk button back.
+            mgrRenderList();
+        });
     }
 
     function closeBackupManager() {
@@ -683,6 +769,10 @@
                 +     '<div class="fav-fix-mgr-note">正在读取备份…</div>'
                 +   '</div>'
                 +   '<div class="fav-fix-mgr-foot">'
+                // Neutral outline, no count: the red framing and the item
+                // count on the bulk delete are a confirmation affordance for a
+                // destructive act, and an export needs neither.
+                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-export" disabled>导出筛选结果</button>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
                 +     '<div class="fav-fix-mgr-pageinfo"></div>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-prev" disabled>上一页</button>'
@@ -697,7 +787,11 @@
                 sort: 'fav_desc',
                 names: new Map(), metas: new Map(), quotaText: null,
                 currentMid: detectMediaId(),
-                urls: [], renderToken: 0, busy: false, backupBusy: false,
+                urls: [], renderToken: 0,
+                // One flag per long operation rather than a single lock: they
+                // exclude each other but disable different controls, and the
+                // release paths are independent.
+                busy: false, backupBusy: false, exportBusy: false,
                 searchTimer: null,
                 onKeydown: null,
                 els: {
@@ -707,6 +801,10 @@
                     folder:   host.querySelector('.fav-fix-mgr-select'),
                     sort:     host.querySelector('.fav-fix-mgr-sort'),
                     backup:   host.querySelector('.fav-fix-mgr-backup'),
+                    // Not `els.export`: a bare `export` identifier is reserved,
+                    // and a property that cannot be destructured or aliased
+                    // without care is not worth the two saved characters.
+                    exportBtn: host.querySelector('.fav-fix-mgr-export'),
                     bulk:     host.querySelector('.fav-fix-mgr-bulk'),
                     prev:     host.querySelector('.fav-fix-mgr-prev'),
                     next:     host.querySelector('.fav-fix-mgr-next'),
@@ -754,6 +852,7 @@
                 mgrApplyFilter();
                 mgrRenderList();
             });
+            s.els.exportBtn.addEventListener('click', mgrExportFiltered);
             s.els.bulk.addEventListener('click', function () {
                 mgrDeleteFiltered().catch(function (e) {
                     warn('mgr: bulk delete threw', e);
@@ -766,7 +865,7 @@
             // adds it as a filter option. Deletes are blocked for the duration
             // (see mgrRenderList); browsing stays free.
             s.els.backup.addEventListener('click', function () {
-                if (s.busy || s.backupBusy) return;
+                if (s.busy || s.backupBusy || s.exportBusy || _exportRunning) return;
                 s.backupBusy = true;
                 s.els.backup.disabled = true;
                 s.els.backup.textContent = '备份中…';
