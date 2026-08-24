@@ -5306,14 +5306,15 @@
         // sees it, while Chromium starts the download regardless of
         // attachment.
         a.click();
-        // Chromium captures the blob when the download STARTS, not when the
-        // click returns — and with Chrome's "ask where to save each file"
-        // setting the start is deferred until the user answers the Save As
-        // dialog, which can sit open for minutes. Revoking under a pending
-        // dialog risks a failed download, so the headroom is generous; the
-        // leak until then is only the zip's part LIST (IDB blob handles, not
-        // bytes), which is cheap to hold.
-        setTimeout(function () { URL.revokeObjectURL(url); }, 600000);
+        // NEVER revoked. Chromium captures the blob when the download STARTS,
+        // not when the click returns — and with Chrome's "ask where to save
+        // each file" setting the start is deferred until the user answers the
+        // Save As dialog, which can sit open indefinitely. An anchor download
+        // gives the page ZERO feedback (no start/complete/cancel event), so
+        // there is no safe moment to revoke and any timer is a guess that
+        // corrupts the download when it guesses wrong. The URL dies with the
+        // document instead; what it pins until then is only the zip's part
+        // LIST (IDB blob handles, not bytes) — a few entries per session.
     }
 
     // ─── Orchestration ──────────────────────────────────────────────────
