@@ -376,6 +376,7 @@
             blob_failed: 0, cover_kept: 0, read_failed: 0
         };
         var aborted = false;
+        var folderTitle = null;
         try {
             toast('开始备份当前收藏夹');
             var pn = 1;
@@ -400,6 +401,7 @@
                     toast('备份中止：第 ' + pn + ' 页抓取失败，已写入的数据保留', 'err');
                     break;
                 }
+                if (!folderTitle && page.folderTitle) folderTitle = page.folderTitle;
                 await backupPageItems(page.list || [], mediaId, stats);
                 // Every page would out-run the toast's own 4.5s lifetime and
                 // stack overlapping banners; every 3rd page keeps the feedback
@@ -430,7 +432,7 @@
             // (14-orchestrate.js); nothing else invalidates that memo without
             // a page load.
             _localOnlyMiss.clear();
-            await writeBackupMeta(mediaId, stats, aborted, pn);
+            await writeBackupMeta(mediaId, stats, aborted, pn, folderTitle);
         }
     }
 
@@ -440,7 +442,7 @@
     // truncated ones — that would report a 40-of-300 failure as a fresh 40-item
     // backup and hide the fact that the folder still needs a full pass. Keep
     // the last complete run intact and record the failed attempt beside it.
-    async function writeBackupMeta(mediaId, stats, aborted, lastPage) {
+    async function writeBackupMeta(mediaId, stats, aborted, lastPage, folderTitle) {
         var key = String(mediaId);
         var prev = null;
         try { prev = await idbGet(BACKUP_STORE_META, key); }
@@ -466,6 +468,11 @@
             };
         }
         rec.media_id             = key;
+        // Folder display name for the manager panel's dropdown. Any run that
+        // learned it (even an aborted one — page 1 usually succeeded) records
+        // it; otherwise whatever a previous run stored is kept via the prev
+        // copy above.
+        rec.title                = folderTitle || rec.title || null;
         rec.last_attempt         = Date.now();
         rec.last_attempt_partial = !!aborted;
         rec.last_attempt_page    = aborted ? (lastPage || 0) : 0;

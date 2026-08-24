@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.11.0
+// @version      0.11.1
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.0)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.11.1)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.11.0';
+    var CORE_VERSION = '0.11.1';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -884,7 +884,12 @@
             out.oid = m.id != null ? m.id : m.oid;
             return out;
         });
-        return { list: list, has_more: !!d.has_more, total: d.info && d.info.media_count };
+        // folderTitle: the folder's own display name, carried by both public
+        // endpoints in d.info.title. The backup walker persists it into the
+        // meta store so the manager panel can label folders by name instead
+        // of a raw media_id. Resolver callers simply ignore the field.
+        return { list: list, has_more: !!d.has_more, total: d.info && d.info.media_count,
+                 folderTitle: (d.info && d.info.title) || null };
     }
 
     // ─── Quality predicates ────────────────────────────────────────────
@@ -3870,6 +3875,7 @@
             blob_failed: 0, cover_kept: 0, read_failed: 0
         };
         var aborted = false;
+        var folderTitle = null;
         try {
             toast('开始备份当前收藏夹');
             var pn = 1;
@@ -3894,6 +3900,7 @@
                     toast('备份中止：第 ' + pn + ' 页抓取失败，已写入的数据保留', 'err');
                     break;
                 }
+                if (!folderTitle && page.folderTitle) folderTitle = page.folderTitle;
                 await backupPageItems(page.list || [], mediaId, stats);
                 // Every page would out-run the toast's own 4.5s lifetime and
                 // stack overlapping banners; every 3rd page keeps the feedback
@@ -3924,7 +3931,7 @@
             // (14-orchestrate.js); nothing else invalidates that memo without
             // a page load.
             _localOnlyMiss.clear();
-            await writeBackupMeta(mediaId, stats, aborted, pn);
+            await writeBackupMeta(mediaId, stats, aborted, pn, folderTitle);
         }
     }
 
@@ -3934,7 +3941,7 @@
     // truncated ones — that would report a 40-of-300 failure as a fresh 40-item
     // backup and hide the fact that the folder still needs a full pass. Keep
     // the last complete run intact and record the failed attempt beside it.
-    async function writeBackupMeta(mediaId, stats, aborted, lastPage) {
+    async function writeBackupMeta(mediaId, stats, aborted, lastPage, folderTitle) {
         var key = String(mediaId);
         var prev = null;
         try { prev = await idbGet(BACKUP_STORE_META, key); }
@@ -3960,6 +3967,11 @@
             };
         }
         rec.media_id             = key;
+        // Folder display name for the manager panel's dropdown. Any run that
+        // learned it (even an aborted one — page 1 usually succeeded) records
+        // it; otherwise whatever a previous run stored is kept via the prev
+        // copy above.
+        rec.title                = folderTitle || rec.title || null;
         rec.last_attempt         = Date.now();
         rec.last_attempt_partial = !!aborted;
         rec.last_attempt_page    = aborted ? (lastPage || 0) : 0;
@@ -4247,6 +4259,29 @@
         });
     }
 
+    // Folder display names for the dropdown, merged from two layers: the meta
+    // store (persisted by the backup walker via normalizePublicResp's
+    // folderTitle since 0.11.1) wins; the sidebar DOM fills in folders backed
+    // up before names were stored (its items carry the fid as the element id
+    // and "<name> <count>" as text — the default folder's item has NO id, so
+    // it stays covered only by the meta layer). Anything in neither layer
+    // falls back to '收藏夹 <id>' at render time.
+    function mgrBuildFolderNames() {
+        var names = new Map();
+        try {
+            var items = document.querySelectorAll('div.fav-sidebar-item[id]');
+            for (var i = 0; i < items.length; i++) {
+                var id = items[i].getAttribute('id');
+                if (!/^\d+$/.test(id)) continue;
+                var t = items[i].textContent.replace(/\s+/g, ' ').trim().replace(/\s*\d+$/, '');
+                if (t) names.set(id, t);
+            }
+        } catch (e) { /* sidebar layout changed — raw ids still render */ }
+        return idbCursorEach(BACKUP_STORE_META, function (rec) {
+            if (rec && rec.media_id && rec.title) names.set(String(rec.media_id), rec.title);
+        }).then(function () { return names; }, function () { return names; });
+    }
+
     // Three-layer delete (see the header invariants). pageCache is NOT cleared
     // here: it is keyed by page, not by av, so the caller drops it once after a
     // whole batch instead of once per item.
@@ -4322,7 +4357,7 @@
         if (s.folder !== '*' && !counts.has(s.folder)) s.folder = '*';
         var html = '<option value="*">全部收藏夹（' + s.index.length + '）</option>';
         for (var m = 0; m < keys.length; m++) {
-            var label = '收藏夹 ' + keys[m]
+            var label = (s.names.get(keys[m]) || ('收藏夹 ' + keys[m]))
                       + (s.currentMid && keys[m] === String(s.currentMid) ? ' · 当前收藏夹' : '')
                       + '（' + counts.get(keys[m]) + '）';
             html += '<option value="' + esc(keys[m]) + '">' + esc(label) + '</option>';
@@ -4413,8 +4448,14 @@
                                    + ' 页 · 共 ' + total + ' 项';
         s.els.prev.disabled = s.busy || s.page <= 1;
         s.els.next.disabled = s.busy || s.page >= pages;
-        s.els.bulk.disabled = s.busy || !total;
+        // Both write paths (delete, in-panel backup) mutually exclude each
+        // other; browsing stays free during either.
+        s.els.bulk.disabled = s.busy || s.backupBusy || !total;
         s.els.bulk.textContent = '删除当前筛选结果（' + total + ' 项）';
+        if (s.backupBusy) {
+            var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
+            for (var d = 0; d < dels.length; d++) dels[d].disabled = true;
+        }
     }
 
     // Re-entrancy guard for both delete paths: an in-flight delete must not be
@@ -4475,9 +4516,32 @@
         mgrRenderList();
     }
 
+    // Full refresh after an in-panel backup: the index, the folder-name map
+    // and every surface derived from them are stale. Search text typed during
+    // the run is honoured (mgrResyncSearch), the folder selection survives
+    // unless its folder vanished (mgrRenderFolders resets it), and deletes are
+    // blocked for the whole backup, so this can never repaint rows out from
+    // under an in-flight delete batch.
+    function mgrRefreshIndex() {
+        var s = _mgrState;
+        if (!s) return Promise.resolve();
+        return Promise.all([buildBackupIndex(), mgrBuildFolderNames()]).then(function (res) {
+            if (_mgrState !== s) return;
+            s.index = res[0];
+            s.names = res[1];
+            mgrResyncSearch();
+            mgrRenderHead();
+            mgrRenderFolders();
+            mgrApplyFilter();
+            mgrRenderList();
+        }).catch(function (e) {
+            warn('mgr: refresh failed', e && e.message);
+        });
+    }
+
     function mgrDeleteOne(rec) {
         var s = _mgrState;
-        if (s.busy) return;
+        if (s.busy || s.backupBusy) return;
         if (!confirm('确定删除该条目的备份？\n\n' + rec.title + '\n\n删除后无法恢复。')) return;
         mgrSetBusy(true);
         deleteBackupAv(rec.av).then(function () {
@@ -4503,7 +4567,7 @@
 
     async function mgrDeleteFiltered() {
         var s = _mgrState;
-        if (s.busy) return;
+        if (s.busy || s.backupBusy) return;
         var targets = s.filtered.slice();
         if (!targets.length) return;
         var whole = (s.folder === '*' && !s.query.trim());
@@ -4593,6 +4657,7 @@
                 +   '<div class="fav-fix-mgr-tools">'
                 +     '<input class="fav-fix-mgr-input" type="text" placeholder="搜索标题 / BV 号 / UP 主">'
                 +     '<select class="fav-fix-mgr-select"><option value="*">全部收藏夹</option></select>'
+                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-backup">备份当前收藏夹</button>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
                 +   '</div>'
                 +   '<div class="fav-fix-mgr-body">'
@@ -4609,14 +4674,17 @@
 
             _mgrState = {
                 index: [], filtered: [], page: 1, query: '', folder: '*',
+                names: new Map(),
                 currentMid: detectMediaId(),
-                urls: [], renderToken: 0, busy: false, searchTimer: null,
+                urls: [], renderToken: 0, busy: false, backupBusy: false,
+                searchTimer: null,
                 onKeydown: null,
                 els: {
                     stat:     host.querySelector('.fav-fix-mgr-stat'),
                     body:     host.querySelector('.fav-fix-mgr-body'),
                     search:   host.querySelector('.fav-fix-mgr-input'),
                     folder:   host.querySelector('.fav-fix-mgr-select'),
+                    backup:   host.querySelector('.fav-fix-mgr-backup'),
                     bulk:     host.querySelector('.fav-fix-mgr-bulk'),
                     prev:     host.querySelector('.fav-fix-mgr-prev'),
                     next:     host.querySelector('.fav-fix-mgr-next'),
@@ -4664,6 +4732,33 @@
                     toast('批量删除失败：' + (e && e.message), 'err');
                 });
             });
+            // In-panel backup: backupCurrentFolder() re-detects the folder at
+            // run time, so the flow for a folder the dropdown does not list
+            // yet is: switch the page to it, click this, and the refresh below
+            // adds it as a filter option. Deletes are blocked for the duration
+            // (see mgrRenderList); browsing stays free.
+            s.els.backup.addEventListener('click', function () {
+                if (s.busy || s.backupBusy) return;
+                s.backupBusy = true;
+                s.els.backup.disabled = true;
+                s.els.backup.textContent = '备份中…';
+                mgrRenderList();
+                backupCurrentFolder().catch(function (e) {
+                    warn('mgr: in-panel backup threw', e);
+                    toast('备份失败：' + (e && e.message), 'err');
+                    return null;
+                }).then(function () {
+                    if (_mgrState !== s) return;
+                    s.backupBusy = false;
+                    s.els.backup.disabled = false;
+                    s.els.backup.textContent = '备份当前收藏夹';
+                    // The run may have been for a different folder than the
+                    // one the panel opened on — re-detect so the 当前收藏夹
+                    // marker follows what was actually just backed up.
+                    s.currentMid = detectMediaId();
+                    return mgrRefreshIndex();
+                });
+            });
             s.els.prev.addEventListener('click', function () {
                 if (s.page > 1) { s.page--; mgrRenderList(); }
             });
@@ -4671,8 +4766,11 @@
                 s.page++; mgrRenderList();
             });
 
-            var index;
-            try { index = await buildBackupIndex(); }
+            var index, names;
+            try {
+                index = await buildBackupIndex();
+                names = await mgrBuildFolderNames();
+            }
             catch (e) {
                 warn('mgr: index build failed', e);
                 closeBackupManager();
@@ -4681,6 +4779,7 @@
             }
             if (_mgrState !== s) return;   // closed while the cursor was walking
             s.index = index;
+            s.names = names;
             mgrRenderHead();
             mgrRenderFolders();
             mgrApplyFilter();

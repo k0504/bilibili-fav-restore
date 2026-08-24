@@ -303,6 +303,11 @@
             out.oid = m.id != null ? m.id : m.oid;
             return out;
         });
-        return { list: list, has_more: !!d.has_more, total: d.info && d.info.media_count };
+        // folderTitle: the folder's own display name, carried by both public
+        // endpoints in d.info.title. The backup walker persists it into the
+        // meta store so the manager panel can label folders by name instead
+        // of a raw media_id. Resolver callers simply ignore the field.
+        return { list: list, has_more: !!d.has_more, total: d.info && d.info.media_count,
+                 folderTitle: (d.info && d.info.title) || null };
     }
 
