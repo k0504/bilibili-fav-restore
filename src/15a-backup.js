@@ -35,14 +35,15 @@
     var BACKUP_STORE_ITEMS = 'items';
     var BACKUP_STORE_META  = 'meta';
 
-    // Walk limits. 500 pages x ps=20 = 10000 items: far above MAX_PAGE_WALK
-    // (which bounds the *rescue* walks, where a long walk delays a DOM patch)
+    // Walk limits. 500 pages x ps=20 = 10000 items: far above the rescue-walk
+    // cap (cfg('maxPageWalk'), where a long walk delays a DOM patch)
     // because a backup is an explicit, user-initiated, one-off operation and
     // truncating it silently loses data the user asked us to keep.
-    var BACKUP_MAX_PAGES        = 500;
-    var BACKUP_PAGE_DELAY_MS    = 300;   // politeness gap between folder pages
-    var BACKUP_BLOB_CONCURRENCY = 3;     // parallel cover downloads
-    var BACKUP_PROGRESS_EVERY   = 3;     // toast every N pages (page 1 always)
+    // → cfg('backupMaxPages'), default 500.
+    // → cfg('backupPageDelayMs'), default 300 — politeness gap between pages.
+    // → cfg('backupBlobConcurrency'), default 3 — parallel cover downloads.
+    // → cfg('backupProgressEvery'), default 3 — toast every N pages (page 1
+    //   always).
 
     // ─── IndexedDB plumbing ─────────────────────────────────────────────
     // Lazy single open, promise-wrapped. No third-party wrapper library: the
@@ -352,8 +353,9 @@
         }
         // Bounded parallelism for the cover downloads: serial is needlessly
         // slow on a 200-item folder, unbounded hammers the CDN.
-        for (var j = 0; j < tasks.length; j += BACKUP_BLOB_CONCURRENCY) {
-            var chunk = tasks.slice(j, j + BACKUP_BLOB_CONCURRENCY);
+        var concurrency = cfg('backupBlobConcurrency');
+        for (var j = 0; j < tasks.length; j += concurrency) {
+            var chunk = tasks.slice(j, j + concurrency);
             await Promise.all(chunk.map(function (t) { return commitBackupRecord(t, stats); }));
         }
     }
@@ -385,7 +387,7 @@
         try {
             toast('开始备份当前收藏夹');
             var pn = 1;
-            while (pn <= BACKUP_MAX_PAGES) {
+            while (pn <= cfg('backupMaxPages')) {
                 // Walk `public` DIRECTLY, bypassing ensurePage/pageCache. Same
                 // reasoning as the flap loop (AGENTS.md gotcha 16b): we want a
                 // fresh server sample, and a long backup walk must not poison
@@ -411,12 +413,12 @@
                 // Every page would out-run the toast's own 4.5s lifetime and
                 // stack overlapping banners; every 3rd page keeps the feedback
                 // continuous without piling up.
-                if (pn % BACKUP_PROGRESS_EVERY === 0) {
+                if (pn % cfg('backupProgressEvery') === 0) {
                     toast('备份中：第 ' + pn + ' 页，已处理 ' + stats.total_seen + ' 项');
                 }
                 if (!page.has_more) break;
                 pn++;
-                await backupSleep(BACKUP_PAGE_DELAY_MS);
+                await backupSleep(cfg('backupPageDelayMs'));
             }
             if (!aborted) {
                 var summary = '备份完成：新增 ' + stats.backed + ' · 更新 ' + stats.updated

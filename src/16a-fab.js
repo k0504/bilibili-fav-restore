@@ -15,6 +15,10 @@
     //   press + release without moving → toggle the menu
     //   menu level 0  → categories; level 1 → that category's commands,
     //                   with 返回 as the first row (the user's stated shape)
+    //   a level-0 entry carrying `run` instead of `items` is a DIRECT
+    //                   action — no chevron, no second level. Reserved for
+    //                   a destination that is a whole surface of its own
+    //                   (设置), which a one-item category would misrepresent.
     //
     // ── Geometry constraint (learned the hard way elsewhere) ──
     // The menu MUST be position:absolute, anchored on the button. If it sat
@@ -44,6 +48,7 @@
     function fabAuthHint()    { var a = getAuth(); return a.access_key ? (a.mode || '已登录') : '未登录'; }
     function fabNoRetryHint() { var c = noRetryCounts(); var n = c.user + c.auto; return n ? n + ' 项' : '无'; }
     function fabPageHint()    { var n = pendingAvsOnPage().length; return n ? n + ' 项' : '无'; }
+    function fabSettingsHint(){ var n = Object.keys(cfgChanged()).length; return n ? n + ' 项已改' : '默认'; }
 
     // The menu tree. Data, not code: one place to read what the script can do.
     // `danger: true` paints the row red — reserved for the two commands that
@@ -71,7 +76,8 @@
         { id: 'maint', label: '维护与调试', items: [
             { label: '开关调试日志',          run: cmdToggleDebug, hint: fabDebugHint },
             { label: '清除所有缓存并刷新页面', run: cmdClearAllCache, danger: true }
-        ] }
+        ] },
+        { id: 'settings', label: '设置', run: cmdSettings, hint: fabSettingsHint }
     ];
 
     var FAB_ICON_IDLE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>';
@@ -259,11 +265,19 @@
             list.className = 'fav-fix-fab-list';
             for (i = 0; i < FAB_MENU.length; i++) {
                 (function (cat) {
-                    var row = fabRow('fav-fix-fab-row', cat.label, fabHint(cat.hint), '›');
+                    // No chevron on a direct action: the chevron is this
+                    // menu's only promise about what a click does.
+                    var isAction = typeof cat.run === 'function';
+                    var row = fabRow('fav-fix-fab-row', cat.label, fabHint(cat.hint),
+                                     isAction ? '' : '›');
                     row.addEventListener('click', function (e) {
                         e.preventDefault(); e.stopPropagation();
-                        _fabCat = cat.id;
-                        fabRenderMenu();
+                        if (!isAction) { _fabCat = cat.id; fabRenderMenu(); return; }
+                        // Same close-first / catch-the-throw contract as the
+                        // level-1 rows below.
+                        fabClose();
+                        try { cat.run(); }
+                        catch (err) { warn('fab: command threw', err); toast('操作失败：' + (err && err.message), 'err'); }
                     });
                     list.appendChild(row);
                 })(FAB_MENU[i]);
@@ -278,7 +292,9 @@
         }
 
         var cat = null;
-        for (i = 0; i < FAB_MENU.length; i++) if (FAB_MENU[i].id === _fabCat) cat = FAB_MENU[i];
+        for (i = 0; i < FAB_MENU.length; i++) {
+            if (FAB_MENU[i].id === _fabCat && FAB_MENU[i].items) cat = FAB_MENU[i];
+        }
         // The open category vanished (only reachable if FAB_MENU changed under
         // us). Fall back to the top level rather than rendering an empty menu.
         if (!cat) { _fabCat = null; fabRenderMenu(); return; }

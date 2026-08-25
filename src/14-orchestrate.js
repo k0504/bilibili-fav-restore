@@ -83,9 +83,9 @@
                 // Safety net: if neither event fires (browser cached
                 // the new src because the same hdslb URL was loaded
                 // earlier this session, or some other edge), the
-                // spinner would hang forever. 4s is generous for
-                // hdslb but short enough to not feel broken.
-                setTimeout(finish, 4000);
+                // spinner would hang forever. The default is generous
+                // for hdslb but short enough to not feel broken.
+                setTimeout(finish, cfg('coverLoadTimeoutMs'));
                 // Third arg = av: lets patchCover fall back to the local
                 // backup's cover Blob if this URL 404s (09-dom.js).
                 patchCover(img, real.cover, real.oid != null ? String(real.oid) : null);
@@ -314,7 +314,7 @@
         pendingTick = setTimeout(function () {
             pendingTick = null;
             patchOnce().catch(function (e) { warn('patchOnce threw:', e); });
-        }, 400);
+        }, cfg('patchDebounceMs'));
     }
 
     function startObserver() {
@@ -335,7 +335,7 @@
                 setTimeout(function () {
                     var mid = detectMediaId();
                     if (mid) detectMissingAndRender(mid);
-                }, 1500);
+                }, cfg('spaSwitchDelayMs'));
             }
             schedule();
         });

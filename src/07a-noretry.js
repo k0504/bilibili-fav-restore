@@ -13,7 +13,7 @@
     // Two modes, at most one record per av:
     //   'user' — the user pressed 停止重试. Never expires.
     //   'auto' — runFlapRecovery genuinely gave up on this av. Expires after
-    //            AUTO_NORETRY_TTL_MS, so a folder that merely flapped badly for
+    //            the auto TTL, so a folder that merely flapped badly for
     //            one afternoon is not written off permanently.
     // 'user' overwrites 'auto'; 'auto' must NEVER overwrite 'user' (that would
     // silently downgrade a permanent decision into one expiring in a week).
@@ -36,7 +36,9 @@
     // do not try to work around it here.
 
     var NORETRY_PREFIX      = 'noretry:av';
-    var AUTO_NORETRY_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+    // → cfg('autoNoRetryTtlDays'), default 7. Read through autoNoRetryTtlMs()
+    // rather than inlined, because three call sites need the same conversion.
+    function autoNoRetryTtlMs() { return cfg('autoNoRetryTtlDays') * 86400000; }
 
     var _noRetryUser   = new Map();   // av → ms the user pressed stop (permanent)
     var _noRetryAuto   = new Map();   // av → ms the loop gave up (7-day life)
@@ -67,7 +69,7 @@
             // way for the UI to show or clear it.
             if (!v || (v.mode !== 'user' && v.mode !== 'auto')) { GM_deleteValue(k); return; }
             if (v.mode === 'user') { _noRetryUser.set(av, v.at || 0); return; }
-            if (now - (v.at || 0) > AUTO_NORETRY_TTL_MS) { GM_deleteValue(k); expired++; return; }
+            if (now - (v.at || 0) > autoNoRetryTtlMs()) { GM_deleteValue(k); expired++; return; }
             _noRetryAuto.set(av, v.at || 0);
         });
         log('noretry: loaded', _noRetryUser.size, 'user +', _noRetryAuto.size,
@@ -89,7 +91,7 @@
     }
 
     // The gate for automatic network work: a manual stop, or an auto record the
-    // loop wrote less than AUTO_NORETRY_TTL_MS ago. Expired auto records are
+    // loop wrote less than autoNoRetryTtlMs() ago. Expired auto records are
     // cleared on the spot so the storage entry disappears with the suppression.
     function isRetrySuppressed(av) {
         loadNoRetryIndex();
@@ -97,7 +99,7 @@
         if (_noRetryUser.has(av)) return true;
         var at = _noRetryAuto.get(av);
         if (at == null) return false;
-        if (Date.now() - at > AUTO_NORETRY_TTL_MS) { clearNoRetry(av); return false; }
+        if (Date.now() - at > autoNoRetryTtlMs()) { clearNoRetry(av); return false; }
         return true;
     }
 
@@ -156,7 +158,7 @@
         });
         _noRetryAuto.forEach(function (at, av) {
             out.push({ av: av, mode: 'auto', at: at, when: at ? new Date(at).toLocaleString() : null,
-                       expiresAt: at ? new Date(at + AUTO_NORETRY_TTL_MS).toLocaleString() : null });
+                       expiresAt: at ? new Date(at + autoNoRetryTtlMs()).toLocaleString() : null });
         });
         return out;
     }

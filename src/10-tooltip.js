@@ -365,7 +365,7 @@
                 var liveReal = (el && el.__favFixReal) || real;
                 tip.innerHTML = buildTipHtml(liveReal);
                 if (!liveReal._pending) stopTipRefresh();
-            }, 1000);
+            }, cfg('tooltipRefreshMs'));
         }
     }
     function hideTip() {

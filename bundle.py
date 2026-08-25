@@ -44,6 +44,7 @@ class BundleError(Exception):
 MANIFEST = [
     '00-prologue.js',       # banner, IIFE open, load guard, pageWin
     '01-constants.js',      # appkeys/tokens, MAX_PAGE_WALK, CARD_SELECTOR, DEBUG, log/warn
+    '01a-settings.js',      # user-tunable settings registry + cfg() accessor
     '02-md5.js',            # blueimp-md5 (inline, MIT)
     '03-http.js',           # signParams, toQuery, gmGet, gmPostForm
     '04-auth.js',           # auth storage + TV QR login + manual login
@@ -65,6 +66,7 @@ MANIFEST = [
     '15d-backup-import.js', # zip reader + importBackupFile (merge back into IDB)
     '16-menu-commands.js',  # command implementations + GM_registerMenuCommand wiring
     '16a-fab.js',           # draggable floating action button + two-level menu
+    '16b-settings.js',      # settings modal rendered from SETTINGS_SCHEMA
     '17-boot.js',           # boot + __biliFavFix debug surface + IIFE close
 ]
 

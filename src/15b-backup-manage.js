@@ -28,8 +28,8 @@
     //     CARD_SELECTOR, so the MutationObserver's card scan (14-orchestrate.js)
     //     never mistakes a row for a bilibili video card.
 
-    var MGR_PAGE_SIZE          = 20;
-    var MGR_SEARCH_DEBOUNCE_MS = 300;
+    // → cfg('mgrPageSize'), default 20.
+    // → cfg('mgrSearchDebounceMs'), default 300.
 
     var _mgrHost    = null;   // overlay root; non-null means the panel is open
     var _mgrState   = null;   // see openBackupManager() for the shape
@@ -432,10 +432,11 @@
         body.innerHTML = '';
 
         var total = s.filtered.length;
-        var pages = Math.max(1, Math.ceil(total / MGR_PAGE_SIZE));
+        var pageSize = cfg('mgrPageSize');
+        var pages = Math.max(1, Math.ceil(total / pageSize));
         if (s.page > pages) s.page = pages;
-        var start = (s.page - 1) * MGR_PAGE_SIZE;
-        var slice = s.filtered.slice(start, start + MGR_PAGE_SIZE);
+        var start = (s.page - 1) * pageSize;
+        var slice = s.filtered.slice(start, start + pageSize);
 
         if (!s.index.length) {
             body.innerHTML = '<div class="fav-fix-mgr-note">暂无备份数据<br>'
@@ -523,7 +524,7 @@
         // Recompute rather than blanket-enable on release: a delete that ends
         // without a re-render (the failure path) must not leave 下一页 clickable
         // on the last page.
-        var pages = Math.max(1, Math.ceil(s.filtered.length / MGR_PAGE_SIZE));
+        var pages = Math.max(1, Math.ceil(s.filtered.length / cfg('mgrPageSize')));
         // s.busy is already assigned above, so mgrLocked() sees this release.
         // Same computation as in mgrRenderList: a delete that ends without a
         // re-render must not hand the footer buttons back while another long
@@ -944,7 +945,7 @@
                     s.query = s.els.search.value;
                     mgrApplyFilter();
                     mgrRenderList();
-                }, MGR_SEARCH_DEBOUNCE_MS);
+                }, cfg('mgrSearchDebounceMs'));
             });
             s.els.folder.addEventListener('change', function () {
                 if (s.busy) { s.els.folder.value = s.folder; return; }

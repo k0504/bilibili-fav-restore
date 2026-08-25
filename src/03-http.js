@@ -19,7 +19,7 @@
 
     function gmGet(url, opts) {
         opts = opts || {};
-        var timeoutMs = opts.timeout || 15000;
+        var timeoutMs = opts.timeout || cfg('httpTimeoutMs');
         // GM_xmlhttpRequest's `timeout` field is unreliable for connections
         // that stall mid-handshake (no FIN/RST ever sent — e.g. biliplus
         // when its server is overloaded). The `ontimeout` callback simply
@@ -83,7 +83,7 @@
     // never fires on a connection that stalls mid-handshake).
     function gmGetBlob(url, opts) {
         opts = opts || {};
-        var timeoutMs = opts.timeout || 10000;
+        var timeoutMs = opts.timeout || cfg('httpPostTimeoutMs');
         var underlying = new Promise(function (resolve, reject) {
             GM_xmlhttpRequest({
                 method: 'GET',

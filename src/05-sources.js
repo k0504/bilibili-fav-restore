@@ -20,12 +20,13 @@
     // ─── Source failure gate (backoff) ─────────────────────────────────
     // Tracks consecutive timeout/network failures per source. After N hits
     // in a row, the source is considered "down" and `gate.isOpen(name)`
-    // returns false for BACKOFF_MS so callers can short-circuit. State is
-    // intentionally process-memory only: a page reload resets the gate so
-    // the user gets a fresh attempt without waiting for the cooldown.
+    // returns false for the cooldown window so callers can short-circuit.
+    // State is intentionally process-memory only: a page reload resets the
+    // gate so the user gets a fresh attempt without waiting out the cooldown.
     var sourceFailureGate = (function () {
-        var FAIL_THRESHOLD = 3;
-        var BACKOFF_MS = 5 * 60 * 1000;          // 5 min
+        // Threshold and cooldown are read at FAILURE time, not captured here:
+        // this IIFE runs once at load, and a value captured now could never
+        // reflect a setting changed later in the same page.
         var failureCounts = {};                  // src → consecutive fail count
         var openAt = {};                         // src → Date.now() when re-enabled
         return {
@@ -40,10 +41,11 @@
                 return true;
             },
             onFail: function (src, reason) {
+                var backoffMs = cfg('sourceBackoffMin') * 60000;
                 failureCounts[src] = (failureCounts[src] || 0) + 1;
-                if (failureCounts[src] >= FAIL_THRESHOLD && !openAt[src]) {
-                    openAt[src] = Date.now() + BACKOFF_MS;
-                    console.warn('[fav-fix/' + src + '] gated for ' + (BACKOFF_MS / 60000)
+                if (failureCounts[src] >= cfg('sourceFailThreshold') && !openAt[src]) {
+                    openAt[src] = Date.now() + backoffMs;
+                    console.warn('[fav-fix/' + src + '] gated for ' + (backoffMs / 60000)
                                  + ' min after ' + failureCounts[src] + ' consecutive failures (last: '
                                  + reason + '). Reload the page to retry sooner.');
                 }
@@ -150,13 +152,13 @@
         //
         // Failure backoff (sourceFailureGate): if a source eats its full
         // per-request timeout (5s) on N consecutive chunks, we mark it
-        // disabled for the next BACKOFF_MS so we don't waste another 5s
+        // disabled for the whole cooldown window so we don't waste another 5s
         // per patch cycle. State is in-memory only — a TM page reload
         // resets and retries everything (typical "is it back yet" check).
         biliplus: {
             name: 'biliplus',
             paginated: false,
-            enabled: function () { return sourceFailureGate.isOpen('biliplus'); },
+            enabled: function () { return cfg('enableBiliplus') && sourceFailureGate.isOpen('biliplus'); },
             fetchAvs: async function (avs) {
                 var out = new Map();
                 if (!avs.length) return out;
@@ -164,12 +166,14 @@
                 // rare and the user often wants to see whether they fired.
                 console.info('[fav-fix/biliplus] querying', avs.length, 'av(s):',
                              avs.slice(0, 5).join(',') + (avs.length > 5 ? ',…' : ''));
-                var CHUNK = 50;
+                // Snapshotted for the whole sweep so the chunk boundaries and
+                // the progress numbers below stay consistent with each other.
+                var CHUNK = cfg('biliplusChunk');
                 // All 3rd-party archives (biliplus / jijidown) are
                 // best-effort fallbacks; never let a slow archive hold
-                // up patching the DOM. Per-chunk timeout 5s (vs gmGet's 15s
-                // default) keeps the worst case bounded.
-                var REQ_TIMEOUT = 5000;
+                // up patching the DOM. The per-request timeout is deliberately
+                // shorter than gmGet's default, keeping the worst case bounded.
+                var REQ_TIMEOUT = cfg('thirdPartyTimeoutMs');
                 var sawAnySuccess = false;
                 var sawAnyFailure = false;
                 for (var i = 0; i < avs.length; i += CHUNK) {
@@ -223,14 +227,14 @@
         jijidown: {
             name: 'jijidown',
             paginated: false,
-            enabled: function () { return sourceFailureGate.isOpen('jijidown'); },
+            enabled: function () { return cfg('enableJijidown') && sourceFailureGate.isOpen('jijidown'); },
             fetchAvs: async function (avs) {
                 if (!avs.length) return new Map();
                 console.info('[fav-fix/jijidown] querying', avs.length, 'av(s) (sequential):',
                              avs.slice(0, 5).join(',') + (avs.length > 5 ? ',…' : ''));
                 var out = new Map();
-                // Per-av timeout 5s — see biliplus comment above.
-                var REQ_TIMEOUT = 5000;
+                // Per-av timeout — see the biliplus comment above.
+                var REQ_TIMEOUT = cfg('thirdPartyTimeoutMs');
                 // get_info is two-phase: the FIRST hit for an aid jijidown
                 // hasn't warmed returns a loading stub
                 // ({code:0, msg:'loading', title:'正在加载数据...'} with NO
@@ -241,8 +245,8 @@
                 // giving up. The phase-2 budget in resolveItems still caps
                 // total wall time, so a folder full of cold aids can't stall
                 // the DOM patch.
-                var LOADING_POLL_MS   = 1200;
-                var LOADING_MAX_POLLS = 2;        // 1 initial request + 2 re-polls
+                var LOADING_POLL_MS   = cfg('jijidownPollMs');
+                var LOADING_MAX_POLLS = cfg('jijidownMaxPolls');   // 1 initial request + this many re-polls
                 var sawAnyResponse = false;
                 for (var i = 0; i < avs.length; i++) {
                     var av = avs[i];

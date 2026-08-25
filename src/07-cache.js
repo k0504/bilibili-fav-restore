@@ -12,7 +12,7 @@
 
     var CACHE_PREFIX  = 'item:av';
     var CACHE_VERSION = 6;   // bumped: +SOURCES.backup (IndexedDB snapshots lead FIELD_PRIORITY)
-    var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
+    // → cfg('cacheTtlDays'), default 30.
     // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
     // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
     // by the background runFlapRecovery loop (08-resolver.js), which re-walks
@@ -22,7 +22,7 @@
     // re-kicks the loop instead of reusing a stale "still deleted" snapshot.
     // A 30-day lock-in would instead turn one bad android walk into a permanent
     // failure, so these stay short.
-    var CACHE_TTL_DEGENERATE_MS = 1000 * 60 * 10;   // 10 min
+    // → cfg('cacheTtlDegenerateMin'), default 10.
 
     function loadCache(av) {
         var v = GM_getValue(CACHE_PREFIX + av, null);
@@ -46,7 +46,8 @@
         // android returned 58/89 on one walk and the dropped items all fell to
         // _no_source). Only a confidently-recovered merge gets the long TTL.
         var ttl = (v._degenerate || v._pending || v._cover_pending)
-                ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+                ? cfg('cacheTtlDegenerateMin') * 60000
+                : cfg('cacheTtlDays') * 86400000;
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }

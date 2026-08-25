@@ -10,6 +10,12 @@
     var PLACEHOLDER_COVER_TOKEN = 'be27fd62';
     var INVALID_TITLE = '已失效视频';
 
+    // ─── Default rationale for the tunables ────────────────────────────
+    // The values below are USER-SETTABLE; they live in SETTINGS_SCHEMA
+    // (01a-settings.js) and are read through cfg(). What stays here is the
+    // reasoning behind each DEFAULT — too long for a settings-modal caption,
+    // and the thing a future reader needs before changing one.
+
     // Max pages walked for ANY full-collection traversal (ps=20 → this×20
     // items). Single source of truth for three call sites that previously
     // used 20/20/30 inconsistently:
@@ -25,7 +31,7 @@
     // 50 pages = 1000 items covers the overwhelming majority of real
     // collections; larger ones skip the (unreliable) missing banner rather
     // than emit a false positive.
-    var MAX_PAGE_WALK = 50;
+    // → cfg('maxPageWalk'), default 50.
 
     // ─── Android flap recovery (background) ─────────────────────────────
     // The android fav endpoint is eventually-consistent: ~5% of invalid
@@ -46,15 +52,17 @@
     //   - recovered ≥1 this walk → dry resets to 0 → sample again fast
     //   - recovered  0 this walk → dry++           → wait longer next walk
     // So while items keep flapping back it samples quickly; once recoveries
-    // dry up it eases off and finally stops (dry === FLAP_MAX_DRY). This makes
+    // dry up it eases off and finally stops (dry === flapMaxDry). This makes
     // a still-flapping folder converge fast while a genuinely-deleted set is
     // abandoned after ~7 cheap samples instead of being hammered.
-    var FLAP_BACKOFF_MS = [1000, 2000, 5000, 15000, 30000, 60000, 120000];
+    // → cfg('flapBackoffMs'), default [1000,2000,5000,15000,30000,60000,120000].
     //   Delay BEFORE the next walk, indexed by the current dry count (clamped
     //   to the last entry). Front-loaded burst (1-5s) catches seconds-level
     //   flapping; the tail widens to a gentle 2-min cadence for stubborn items.
-    var FLAP_MAX_DRY        = 7;                  // give up after this many consecutive 0-recovery walks
-    var FLAP_TIME_BUDGET_MS = 30 * 60 * 1000;     // 30-min overall hard ceiling (active-recovery backstop)
+    // → cfg('flapMaxDry'), default 7 — give up after this many consecutive
+    //   0-recovery walks.
+    // → cfg('flapTimeBudgetMin'), default 30 — overall hard ceiling on one
+    //   recovery run (active-recovery backstop).
 
     // Missing-item banner baseline (fetchFullPhase1Avs in 13-missing.js). The
     // "静默丢弃 N 项" count = (ids inventory) MINUS (what the paginated source
@@ -65,10 +73,12 @@
     // counts dropped if EVERY walk missed it. A fixed walk count is fragile
     // (flap rate varies per folder/moment: too few → over-report, too many →
     // wasted load), so converge like runFlapRecovery instead: keep walking
-    // until MISSING_DRY_ROUNDS consecutive walks add 0 new avs (union saturated),
-    // capped at MISSING_MAX_WALKS. public is stable → one walk.
-    var MISSING_DRY_ROUNDS = 2;   // union saturated after this many 0-new walks
-    var MISSING_MAX_WALKS  = 8;   // hard backstop on android union walks
+    // until missingDryRounds consecutive walks add 0 new avs (union saturated),
+    // capped by missingMaxWalks. public is stable → one walk.
+    // → cfg('missingDryRounds'), default 2 — union saturated after this many
+    //   0-new walks.
+    // → cfg('missingMaxWalks'), default 8 — hard backstop on android union
+    //   walks.
 
     // One bilibili fav "card" across the modern + legacy layouts. Single
     // source of truth shared by findInvalidContainers Strategy 2 (scope the
@@ -79,7 +89,9 @@
     // placeholder fallback for that layout, not the common <img> path.)
     var CARD_SELECTOR = '.bili-video-card, .fav-video-card, .small-item';
 
-    // Settings (overridable via menu commands).
+    // Hot-path mirror of cfg('debug'), kept as a bare boolean because log()
+    // reads it on every call. Seeded here (01a-settings.js has not run yet at
+    // this point) and thereafter maintained by that setting's `apply` hook.
     var DEBUG = !!GM_getValue('debug', false);
 
     function log() {

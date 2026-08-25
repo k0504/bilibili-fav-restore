@@ -72,7 +72,7 @@
     // Why union-to-convergence: a SINGLE android walk drops a large, variable
     // fraction of invalid items (observed 42/89 = 47% on one walk), so each
     // falsely lands in the diff as "silently dropped" and inflates the banner.
-    // Unioning walks until MISSING_DRY_ROUNDS in a row add nothing new means an
+    // Unioning walks until missingDryRounds in a row add nothing new means an
     // item only counts dropped if EVERY walk missed it — the same multi-sample
     // convergence runFlapRecovery (08-resolver.js) uses to recover flappers. A
     // fixed walk count can't work: the flap rate varies, so it would under- or
@@ -83,7 +83,7 @@
     // Returns { avs:Set<avStr>, complete:bool }. `complete` is true ONLY when
     // walk 1 reached a natural has_more=false end (i.e. it saw the whole
     // collection). It is false when walk 1 stopped early — a page error or
-    // the MAX_PAGE_WALK cap. Callers MUST NOT compute a "missing" diff against
+    // the page-walk cap. Callers MUST NOT compute a "missing" diff against
     // an incomplete walk: the unwalked tail would be falsely flagged as
     // silently-dropped (the >600-item false-positive this `complete` flag
     // exists to prevent). The extra union walks never lower `complete`; they
@@ -105,26 +105,35 @@
         // android (eventually-consistent) → union INDEPENDENT walks until the
         // union STOPS GROWING; public (stable) → one walk. The `dry` counter is
         // the convergence signal: a walk that adds a new av resets it, a walk
-        // that adds nothing bumps it, and MISSING_DRY_ROUNDS consecutive 0-new
-        // walks means the union has saturated (we've seen everything android
-        // will return for this folder). Capped at MISSING_MAX_WALKS.
+        // that adds nothing bumps it, and this many consecutive 0-new walks
+        // means the union has saturated (we've seen everything android will
+        // return for this folder). Capped by the walk limit.
+        //
+        // Snapshotted for the duration of the union, for the same reason
+        // runFlapRecovery snapshots its own: the convergence test has to mean
+        // the same thing on the last walk as it did on the first.
+        var maxWalks  = cfg('missingMaxWalks');
+        var dryRounds = cfg('missingDryRounds');
+        var maxPage   = cfg('maxPageWalk');
         var isFlappy = (srcName === 'android');
         var complete = false;
         var walk = 0, dry = 0;
-        while (walk < (isFlappy ? MISSING_MAX_WALKS : 1) && dry < MISSING_DRY_ROUNDS) {
+        while (walk < (isFlappy ? maxWalks : 1) && dry < dryRounds) {
             walk++;
             if (walk > 1) {
                 // Gap so each walk is an INDEPENDENT server sample — back-to-back
                 // requests can replay the same eventually-consistent snapshot;
                 // the flap is observable on a ~seconds cadence. Reuse one short
-                // FLAP_BACKOFF_MS step (NOT the indexed widening one — this is a
+                // flapBackoffMs step (NOT the indexed widening one — this is a
                 // one-shot baseline, not the live retry's load-shaping).
-                await new Promise(function (r) { setTimeout(r, FLAP_BACKOFF_MS[1]); });
+                var ladder = cfg('flapBackoffMs');
+                var gap = ladder[Math.min(1, ladder.length - 1)];
+                await new Promise(function (r) { setTimeout(r, gap); });
                 if (detectMediaId() !== mediaId) break;   // folder switched mid-union
             }
             var before = collected.size;
             var walkComplete = false;
-            for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
+            for (var pn = 1; pn <= maxPage; pn++) {
                 if (detectMediaId() !== mediaId) break;
                 var page;
                 try {
@@ -321,14 +330,14 @@
                 }
                 if (!phase1.complete) {
                     // The walk did NOT reach a natural has_more=false end —
-                    // it was cut short by the MAX_PAGE_WALK cap or a page
+                    // it was cut short by the page-walk cap or a page
                     // error. The unwalked tail would be falsely reported as
                     // "silently dropped" (the >600-item false positive). Skip
                     // WITHOUT marking shown: the {avs,complete} result is
                     // cached, so repeat ticks return instantly and re-skip;
                     // a manual rescan (which clears the cache) can retry.
                     log('detectMissing: phase-1 walk incomplete (declared=' + all.length
-                        + ' walked=' + phase1Avs.size + ', cap=' + MAX_PAGE_WALK
+                        + ' walked=' + phase1Avs.size + ', cap=' + cfg('maxPageWalk')
                         + ' pages) — skipping gap detection to avoid false positives');
                     return;
                 }

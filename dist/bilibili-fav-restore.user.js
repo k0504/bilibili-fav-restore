@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.15.0
+// @version      0.16.0
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.15.0)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.16.0)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.15.0';
+    var CORE_VERSION = '0.16.0';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -112,6 +112,12 @@
     var PLACEHOLDER_COVER_TOKEN = 'be27fd62';
     var INVALID_TITLE = '已失效视频';
 
+    // ─── Default rationale for the tunables ────────────────────────────
+    // The values below are USER-SETTABLE; they live in SETTINGS_SCHEMA
+    // (01a-settings.js) and are read through cfg(). What stays here is the
+    // reasoning behind each DEFAULT — too long for a settings-modal caption,
+    // and the thing a future reader needs before changing one.
+
     // Max pages walked for ANY full-collection traversal (ps=20 → this×20
     // items). Single source of truth for three call sites that previously
     // used 20/20/30 inconsistently:
@@ -127,7 +133,7 @@
     // 50 pages = 1000 items covers the overwhelming majority of real
     // collections; larger ones skip the (unreliable) missing banner rather
     // than emit a false positive.
-    var MAX_PAGE_WALK = 50;
+    // → cfg('maxPageWalk'), default 50.
 
     // ─── Android flap recovery (background) ─────────────────────────────
     // The android fav endpoint is eventually-consistent: ~5% of invalid
@@ -148,15 +154,17 @@
     //   - recovered ≥1 this walk → dry resets to 0 → sample again fast
     //   - recovered  0 this walk → dry++           → wait longer next walk
     // So while items keep flapping back it samples quickly; once recoveries
-    // dry up it eases off and finally stops (dry === FLAP_MAX_DRY). This makes
+    // dry up it eases off and finally stops (dry === flapMaxDry). This makes
     // a still-flapping folder converge fast while a genuinely-deleted set is
     // abandoned after ~7 cheap samples instead of being hammered.
-    var FLAP_BACKOFF_MS = [1000, 2000, 5000, 15000, 30000, 60000, 120000];
+    // → cfg('flapBackoffMs'), default [1000,2000,5000,15000,30000,60000,120000].
     //   Delay BEFORE the next walk, indexed by the current dry count (clamped
     //   to the last entry). Front-loaded burst (1-5s) catches seconds-level
     //   flapping; the tail widens to a gentle 2-min cadence for stubborn items.
-    var FLAP_MAX_DRY        = 7;                  // give up after this many consecutive 0-recovery walks
-    var FLAP_TIME_BUDGET_MS = 30 * 60 * 1000;     // 30-min overall hard ceiling (active-recovery backstop)
+    // → cfg('flapMaxDry'), default 7 — give up after this many consecutive
+    //   0-recovery walks.
+    // → cfg('flapTimeBudgetMin'), default 30 — overall hard ceiling on one
+    //   recovery run (active-recovery backstop).
 
     // Missing-item banner baseline (fetchFullPhase1Avs in 13-missing.js). The
     // "静默丢弃 N 项" count = (ids inventory) MINUS (what the paginated source
@@ -167,10 +175,12 @@
     // counts dropped if EVERY walk missed it. A fixed walk count is fragile
     // (flap rate varies per folder/moment: too few → over-report, too many →
     // wasted load), so converge like runFlapRecovery instead: keep walking
-    // until MISSING_DRY_ROUNDS consecutive walks add 0 new avs (union saturated),
-    // capped at MISSING_MAX_WALKS. public is stable → one walk.
-    var MISSING_DRY_ROUNDS = 2;   // union saturated after this many 0-new walks
-    var MISSING_MAX_WALKS  = 8;   // hard backstop on android union walks
+    // until missingDryRounds consecutive walks add 0 new avs (union saturated),
+    // capped by missingMaxWalks. public is stable → one walk.
+    // → cfg('missingDryRounds'), default 2 — union saturated after this many
+    //   0-new walks.
+    // → cfg('missingMaxWalks'), default 8 — hard backstop on android union
+    //   walks.
 
     // One bilibili fav "card" across the modern + legacy layouts. Single
     // source of truth shared by findInvalidContainers Strategy 2 (scope the
@@ -181,7 +191,9 @@
     // placeholder fallback for that layout, not the common <img> path.)
     var CARD_SELECTOR = '.bili-video-card, .fav-video-card, .small-item';
 
-    // Settings (overridable via menu commands).
+    // Hot-path mirror of cfg('debug'), kept as a bare boolean because log()
+    // reads it on every call. Seeded here (01a-settings.js has not run yet at
+    // this point) and thereafter maintained by that setting's `apply` hook.
     var DEBUG = !!GM_getValue('debug', false);
 
     function log() {
@@ -194,6 +206,349 @@
         console.warn.apply(console, args);
     }
 
+    // ─── Settings registry ──────────────────────────────────────────────
+    //
+    // Every tunable in this script used to be a `var X = <literal>` sitting
+    // next to the code that read it. That is the right shape for a protocol
+    // constant (a ZIP signature, an appkey, the cache schema version) but the
+    // wrong one for a value the USER has a legitimate reason to disagree with:
+    // how many pages a rescue walk may burn, how long a cached merge stays
+    // trusted, whether an av number may be sent to a third-party archive.
+    //
+    // This module is the single registry of those values. It is DATA, not
+    // code — the same shape as SOURCES, FIELD_PRIORITY and FAB_MENU elsewhere
+    // in this file — so adding a tunable means appending one schema row and
+    // nothing else: persistence, validation, the reset paths and every row of
+    // the settings modal (16b-settings.js) are all derived from the schema.
+    //
+    // ── Contract ──
+    //   cfg(key)            → the live value. Cheap (memoised), safe to call
+    //                         on a hot path, never throws, falls back to the
+    //                         schema default for a missing/corrupt store.
+    //   cfgSet(key, raw)    → {ok, value} | {ok:false, error} — validates,
+    //                         persists, updates the memo, runs `apply`.
+    //   cfgReset(key)       → back to the default, store entry deleted.
+    //
+    // ── Why call-time reads ──
+    // Callers read cfg() where they USE the value, not once at boot, so a
+    // change takes effect without a reload. The two exceptions are deliberate
+    // and documented at their sites: a long-running loop (runFlapRecovery) and
+    // a single archive sweep (SOURCES.biliplus / SOURCES.jijidown) each
+    // snapshot their parameters into locals up front, so a mid-flight edit
+    // lands on the NEXT round instead of changing the rules under a
+    // half-finished one.
+    //
+    // ── Storage ──
+    // GM storage under `cfg:<key>`, one entry per NON-DEFAULT setting; a
+    // setting left at its default stores nothing. GM_addValueChangeListener is
+    // not granted and the bootstrap @version is frozen (see AGENTS.md), so —
+    // exactly like the 停止重试 list in 07a — a change made in tab A reaches
+    // tab B only after a reload. Do not try to work around it here.
+
+    var SETTINGS_PREFIX = 'cfg:';
+
+    var SETTINGS_GROUPS = [
+        { id: 'scan',   label: '扫描与修复' },
+        { id: 'retry',  label: '后台重试' },
+        { id: 'cache',  label: '缓存与标记' },
+        { id: 'net',    label: '网络与数据源' },
+        { id: 'backup', label: '备份' },
+        { id: 'ui',     label: '界面与调试' }
+    ];
+
+    // One row per tunable. Fields:
+    //   key/group/label/desc  identity, and what the modal renders
+    //   type                  'int' | 'bool' | 'intlist'
+    //   def                   the value shipped in this version
+    //   min/max               inclusive bounds (an 'int', or EACH member of an
+    //                         'intlist'). Out-of-range input is REFUSED with a
+    //                         message rather than silently clamped: a clamp
+    //                         would report success and then do something else.
+    //   unit                  suffix rendered after the field
+    //   gmKey                 storage-key override, for a setting that existed
+    //                         before this registry did
+    //   apply                 hook run after a successful set, for a value
+    //                         mirrored elsewhere (see `debug`)
+    var SETTINGS_SCHEMA = [
+        // ── 扫描与修复 ──
+        { key: 'maxPageWalk', group: 'scan', type: 'int', def: 50, min: 5, max: 500, unit: '页',
+          label: '修复扫描页数上限',
+          desc: '每页 20 条。收藏夹条目超出上限时，靠后的失效条目扫不到；调高会延长一次完整扫描的耗时。' },
+        { key: 'patchDebounceMs', group: 'scan', type: 'int', def: 400, min: 100, max: 3000, unit: '毫秒',
+          label: '页面变动合并延迟',
+          desc: '页面结构变动后等待多久执行一次修补。调低响应更快，但翻页途中会重复触发。' },
+        { key: 'spaSwitchDelayMs', group: 'scan', type: 'int', def: 1500, min: 200, max: 10000, unit: '毫秒',
+          label: '切换收藏夹后的检测延迟',
+          desc: '切换收藏夹后等待页面稳定的时间，随后才开始检测静默丢弃的条目。网络较慢时可调高。' },
+        { key: 'coverLoadTimeoutMs', group: 'scan', type: 'int', def: 4000, min: 1000, max: 20000, unit: '毫秒',
+          label: '封面加载等待上限',
+          desc: '替换封面后等待图片加载结果的上限。超时即撤下加载动画，避免动画长期停留。' },
+        { key: 'missingDryRounds', group: 'scan', type: 'int', def: 2, min: 1, max: 5, unit: '轮',
+          label: '丢弃检测收敛轮数',
+          desc: '连续这么多轮走访没有发现新条目，即认定并集已饱和。调低会高估「静默丢弃」的数量。' },
+        { key: 'missingMaxWalks', group: 'scan', type: 'int', def: 8, min: 1, max: 20, unit: '次',
+          label: '丢弃检测走访上限',
+          desc: 'android 数据源逐轮抖动，需多轮取并集才准确。这是硬上限，防止无止境走访。' },
+
+        // ── 后台重试 ──
+        { key: 'flapMaxDry', group: 'retry', type: 'int', def: 7, min: 1, max: 30, unit: '轮',
+          label: '放弃前的连续无收获轮数',
+          desc: '后台重试连续这么多轮没有恢复任何条目即停止，并写入自动「停止重试」标记。' },
+        { key: 'flapTimeBudgetMin', group: 'retry', type: 'int', def: 30, min: 1, max: 240, unit: '分钟',
+          label: '后台重试总时限',
+          desc: '单个收藏夹的后台重试从开始计时的硬上限，无论是否仍有条目待恢复。' },
+        { key: 'flapBackoffMs', group: 'retry', type: 'intlist',
+          def: [1000, 2000, 5000, 15000, 30000, 60000, 120000],
+          min: 200, max: 900000, minLen: 1, maxLen: 12, unit: '毫秒',
+          label: '重试间隔梯度',
+          desc: '按当前连续无收获轮数取用，超出长度则取最后一项。必须非递减，用逗号分隔。前段密集以捕捉秒级抖动，尾段拉长以降低请求压力。' },
+
+        // ── 缓存与标记 ──
+        { key: 'cacheTtlDays', group: 'cache', type: 'int', def: 30, min: 1, max: 365, unit: '天',
+          label: '成功恢复的缓存有效期',
+          desc: '已确定恢复的条目在本地缓存中的存活时间，到期后重新向数据源查询。' },
+        { key: 'cacheTtlDegenerateMin', group: 'cache', type: 'int', def: 10, min: 1, max: 1440, unit: '分钟',
+          label: '未确定恢复的缓存有效期',
+          desc: '仅拿到占位信息、或仍在重试的条目所用的缓存有效期。刻意远短于上一项，避免一次失败的走访被锁定数十天。' },
+        { key: 'autoNoRetryTtlDays', group: 'cache', type: 'int', def: 7, min: 1, max: 90, unit: '天',
+          label: '自动「停止重试」标记有效期',
+          desc: '后台重试放弃后写入的标记的存活时间。手动按下的停止标记不受此项影响，永久有效。' },
+
+        // ── 网络与数据源 ──
+        { key: 'httpTimeoutMs', group: 'net', type: 'int', def: 15000, min: 2000, max: 60000, unit: '毫秒',
+          label: 'GET 请求超时',
+          desc: '未单独指定超时的 GET 请求所使用的默认值。' },
+        { key: 'httpPostTimeoutMs', group: 'net', type: 'int', def: 10000, min: 2000, max: 60000, unit: '毫秒',
+          label: 'POST 请求超时',
+          desc: '登录轮询等表单提交所使用的默认超时。' },
+        { key: 'phase2BudgetMs', group: 'net', type: 'int', def: 10000, min: 1000, max: 60000, unit: '毫秒',
+          label: '第三方数据源总预算',
+          desc: '一次解析中留给全部第三方存档站的合计时间。超时即跳过剩余数据源，先把已拿到的信息贴回页面。' },
+        { key: 'sourceFailThreshold', group: 'net', type: 'int', def: 3, min: 1, max: 10, unit: '次',
+          label: '数据源熔断阈值',
+          desc: '同一数据源连续失败这么多次后暂时停用。刷新页面会立即重置熔断状态。' },
+        { key: 'sourceBackoffMin', group: 'net', type: 'int', def: 5, min: 1, max: 60, unit: '分钟',
+          label: '数据源熔断时长',
+          desc: '触发熔断后停用该数据源的时长。' },
+        { key: 'thirdPartyTimeoutMs', group: 'net', type: 'int', def: 5000, min: 1000, max: 30000, unit: '毫秒',
+          label: '第三方存档站单次超时',
+          desc: 'biliplus 与 jijidown 每次请求的超时。刻意短于通用 GET 超时，避免慢速存档站拖住页面修补。' },
+        { key: 'biliplusChunk', group: 'net', type: 'int', def: 50, min: 1, max: 200, unit: '条',
+          label: 'biliplus 每批查询条数',
+          desc: '单次请求携带的 av 号数量。调高可减少请求次数，但更易触发对方限流。' },
+        { key: 'jijidownPollMs', group: 'net', type: 'int', def: 1200, min: 200, max: 10000, unit: '毫秒',
+          label: 'jijidown 重轮询间隔',
+          desc: 'jijidown 首次查询冷门条目会先返回「正在加载」，需隔一段时间再问一次。' },
+        { key: 'jijidownMaxPolls', group: 'net', type: 'int', def: 2, min: 0, max: 10, unit: '次',
+          label: 'jijidown 重轮询次数',
+          desc: '首次请求之外的追加轮询次数。设为 0 即不再追问，冷门条目基本查不到。' },
+        { key: 'enableBiliplus', group: 'net', type: 'bool', def: true,
+          label: '启用 biliplus 存档源',
+          desc: '关闭后不再向 biliplus.com 发送任何请求。启用时该站会收到失效视频的 av 号。' },
+        { key: 'enableJijidown', group: 'net', type: 'bool', def: true,
+          label: '启用 jijidown 存档源',
+          desc: '关闭后不再向 jijidown.com 发送任何请求。启用时该站会收到失效视频的 av 号。' },
+
+        // ── 备份 ──
+        { key: 'backupMaxPages', group: 'backup', type: 'int', def: 500, min: 10, max: 2000, unit: '页',
+          label: '备份走访页数上限',
+          desc: '每页 20 条。备份是用户主动发起的一次性操作，上限刻意远高于修复扫描：截断即等于丢失数据。' },
+        { key: 'backupPageDelayMs', group: 'backup', type: 'int', def: 300, min: 0, max: 5000, unit: '毫秒',
+          label: '备份翻页间隔',
+          desc: '相邻两页之间的等待时间。调低会加快备份，但请求密度更高。' },
+        { key: 'backupBlobConcurrency', group: 'backup', type: 'int', def: 3, min: 1, max: 16, unit: '并发',
+          label: '封面下载并发数',
+          desc: '同时下载多少张封面。调高更快，但占用更多内存与带宽。' },
+        { key: 'backupProgressEvery', group: 'backup', type: 'int', def: 3, min: 1, max: 50, unit: '页',
+          label: '备份进度提示间隔',
+          desc: '每走访这么多页弹出一次进度提示。第一页始终提示。' },
+
+        // ── 界面与调试 ──
+        { key: 'mgrPageSize', group: 'ui', type: 'int', def: 20, min: 5, max: 100, unit: '条',
+          label: '备份管理每页条数',
+          desc: '备份管理面板一页列出多少条记录。调高会同时加载更多封面缩略图。' },
+        { key: 'mgrSearchDebounceMs', group: 'ui', type: 'int', def: 300, min: 50, max: 2000, unit: '毫秒',
+          label: '备份管理搜索延迟',
+          desc: '停止输入多久之后才执行过滤。' },
+        { key: 'tooltipRefreshMs', group: 'ui', type: 'int', def: 1000, min: 200, max: 10000, unit: '毫秒',
+          label: '悬浮信息刷新间隔',
+          desc: '鼠标停留在仍在重试的卡片上时，信息浮层的刷新频率。' },
+        { key: 'debug', group: 'ui', type: 'bool', def: false, gmKey: 'debug',
+          label: '调试日志',
+          desc: '在浏览器控制台输出详细过程日志。与菜单中的「开关调试日志」是同一个开关。',
+          apply: function (v) { DEBUG = v; } }
+    ];
+
+    // key → entry. A linear scan per cfg() call would be fine at this size,
+    // but cfg() sits on the DOM-patch path and this index costs nothing.
+    var _cfgIndex = (function () {
+        var m = {};
+        for (var i = 0; i < SETTINGS_SCHEMA.length; i++) m[SETTINGS_SCHEMA[i].key] = SETTINGS_SCHEMA[i];
+        return m;
+    })();
+
+    // key → resolved value. Populated lazily by cfg(); invalidated only by
+    // cfgSet / cfgReset — nothing else may write it.
+    var _cfgCache = {};
+
+    function cfgEntry(key) { return _cfgIndex[key] || null; }
+    function cfgGmKey(e)   { return e.gmKey || (SETTINGS_PREFIX + e.key); }
+
+    // Parse + validate ONE candidate against its schema row. Returns
+    // {ok:true, value} or {ok:false, error}. Feeds both user input (strings
+    // out of the modal) and stored values (already typed), so every branch
+    // has to accept the string form as well.
+    function cfgCoerce(e, raw) {
+        if (e.type === 'bool') {
+            if (typeof raw === 'boolean') return { ok: true, value: raw };
+            if (raw === 'true'  || raw === 1 || raw === '1') return { ok: true, value: true };
+            if (raw === 'false' || raw === 0 || raw === '0') return { ok: true, value: false };
+            return { ok: false, error: '必须是开或关' };
+        }
+        if (e.type === 'int') {
+            var s = String(raw).trim();
+            if (!s) return { ok: false, error: '不能为空' };
+            var n = Number(s);
+            if (!isFinite(n)) return { ok: false, error: '必须是数字' };
+            if (Math.floor(n) !== n) return { ok: false, error: '必须是整数' };
+            if (n < e.min || n > e.max) return { ok: false, error: '取值范围 ' + e.min + ' – ' + e.max };
+            return { ok: true, value: n };
+        }
+        if (e.type === 'intlist') {
+            var parts = Array.isArray(raw)
+                ? raw.slice()
+                : String(raw).split(/[,，\s]+/).filter(function (x) { return x !== ''; });
+            if (parts.length < e.minLen || parts.length > e.maxLen) {
+                return { ok: false, error: '需要 ' + e.minLen + ' – ' + e.maxLen + ' 个数值' };
+            }
+            var out = [];
+            for (var i = 0; i < parts.length; i++) {
+                var v = Number(String(parts[i]).trim());
+                if (!isFinite(v) || Math.floor(v) !== v) {
+                    return { ok: false, error: '第 ' + (i + 1) + ' 项不是整数' };
+                }
+                if (v < e.min || v > e.max) {
+                    return { ok: false, error: '第 ' + (i + 1) + ' 项超出范围 ' + e.min + ' – ' + e.max };
+                }
+                // The ladder is indexed by a counter that only grows, so a dip
+                // would make the script back off LESS the longer a failure
+                // persists — the opposite of what a backoff is for.
+                if (i && v < out[i - 1]) {
+                    return { ok: false, error: '第 ' + (i + 1) + ' 项小于前一项，必须非递减' };
+                }
+                out.push(v);
+            }
+            return { ok: true, value: out };
+        }
+        return { ok: false, error: '未知的设置类型' };
+    }
+
+    // The live value. Never throws: an unreadable store, a value written by an
+    // older version whose bounds have since narrowed, or a key dropped from the
+    // schema all degrade to the default rather than taking a caller down with
+    // them — every call site here is on a path the user is watching.
+    function cfg(key) {
+        if (Object.prototype.hasOwnProperty.call(_cfgCache, key)) return _cfgCache[key];
+        var e = cfgEntry(key);
+        if (!e) { warn('cfg: unknown setting ' + key); return undefined; }
+        var val = e.def;
+        try {
+            var raw = GM_getValue(cfgGmKey(e), null);
+            if (raw !== null && raw !== undefined) {
+                var r = cfgCoerce(e, raw);
+                if (r.ok) val = r.value;
+                else warn('cfg: stored value for ' + key + ' rejected (' + r.error + ') — using default');
+            }
+        } catch (err) { warn('cfg: read failed for ' + key, err); }
+        // Frozen because the memo hands the SAME array to every caller: an
+        // accidental push / sort at one call site would otherwise rewrite the
+        // setting for the rest of this page's life.
+        if (Array.isArray(val)) Object.freeze(val);
+        _cfgCache[key] = val;
+        return val;
+    }
+
+    function cfgIsDefault(key) {
+        var e = cfgEntry(key);
+        if (!e) return true;
+        var v = cfg(key);
+        // Arrays compare by identity, and the stored one is a different object
+        // from e.def even when it holds the same numbers.
+        if (Array.isArray(e.def)) return String(v) === String(e.def);
+        return v === e.def;
+    }
+
+    // Validate → persist → memoise → apply. A value equal to the default
+    // DELETES its store entry instead of writing it, so "what has this user
+    // actually changed" stays answerable, and a future change to a default
+    // still reaches everyone who never touched that setting.
+    function cfgSet(key, raw) {
+        var e = cfgEntry(key);
+        if (!e) return { ok: false, error: '未知设置项' };
+        var r = cfgCoerce(e, raw);
+        if (!r.ok) return r;
+        var isDef = Array.isArray(e.def) ? (String(r.value) === String(e.def)) : (r.value === e.def);
+        try {
+            if (isDef) GM_deleteValue(cfgGmKey(e));
+            else GM_setValue(cfgGmKey(e), r.value);
+        } catch (err) {
+            warn('cfg: write failed for ' + key, err);
+            return { ok: false, error: '无法写入设置存储' };
+        }
+        if (Array.isArray(r.value)) Object.freeze(r.value);
+        _cfgCache[key] = r.value;
+        // A throwing hook must not make the write look failed: the value IS
+        // stored by this point, and saying otherwise would invite the user to
+        // set it a second time.
+        if (e.apply) {
+            try { e.apply(r.value); }
+            catch (err2) { warn('cfg: apply hook threw for ' + key, err2); }
+        }
+        return { ok: true, value: r.value };
+    }
+
+    function cfgReset(key) {
+        var e = cfgEntry(key);
+        if (!e) return { ok: false, error: '未知设置项' };
+        return cfgSet(key, e.def);
+    }
+
+    // Resets one group, or everything when groupId is omitted. Returns how many
+    // settings were actually carrying a non-default value, so a caller can tell
+    // "已恢复 6 项" apart from "nothing to reset".
+    function cfgResetAll(groupId) {
+        var n = 0;
+        for (var i = 0; i < SETTINGS_SCHEMA.length; i++) {
+            var e = SETTINGS_SCHEMA[i];
+            if (groupId && e.group !== groupId) continue;
+            if (cfgIsDefault(e.key)) continue;
+            if (cfgReset(e.key).ok) n++;
+        }
+        return n;
+    }
+
+    // Every non-default setting — for the debug surface, and for the "what did
+    // you change" question every bug report eventually needs answered.
+    function cfgChanged() {
+        var out = {};
+        for (var i = 0; i < SETTINGS_SCHEMA.length; i++) {
+            var k = SETTINGS_SCHEMA[i].key;
+            if (!cfgIsDefault(k)) out[k] = cfg(k);
+        }
+        return out;
+    }
+
+    // Run every `apply` hook once at boot, so a mirrored value (DEBUG) reflects
+    // the store from the first line of the first patch rather than from the
+    // first time someone happens to open the settings modal.
+    function cfgBoot() {
+        for (var i = 0; i < SETTINGS_SCHEMA.length; i++) {
+            var e = SETTINGS_SCHEMA[i];
+            if (!e.apply) continue;
+            try { e.apply(cfg(e.key)); }
+            catch (err) { warn('cfg: boot apply threw for ' + e.key, err); }
+        }
+    }
     // ─── MD5 (RFC 1321, compact public-domain implementation) ───────────
     // Source: blueimp-md5 (https://github.com/blueimp/JavaScript-MD5),
     // MIT-licensed. Minified inline so the core stays single-file.
@@ -335,7 +690,7 @@
 
     function gmGet(url, opts) {
         opts = opts || {};
-        var timeoutMs = opts.timeout || 15000;
+        var timeoutMs = opts.timeout || cfg('httpTimeoutMs');
         // GM_xmlhttpRequest's `timeout` field is unreliable for connections
         // that stall mid-handshake (no FIN/RST ever sent — e.g. biliplus
         // when its server is overloaded). The `ontimeout` callback simply
@@ -399,7 +754,7 @@
     // never fires on a connection that stalls mid-handshake).
     function gmGetBlob(url, opts) {
         opts = opts || {};
-        var timeoutMs = opts.timeout || 10000;
+        var timeoutMs = opts.timeout || cfg('httpPostTimeoutMs');
         var underlying = new Promise(function (resolve, reject) {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -601,12 +956,13 @@
     // ─── Source failure gate (backoff) ─────────────────────────────────
     // Tracks consecutive timeout/network failures per source. After N hits
     // in a row, the source is considered "down" and `gate.isOpen(name)`
-    // returns false for BACKOFF_MS so callers can short-circuit. State is
-    // intentionally process-memory only: a page reload resets the gate so
-    // the user gets a fresh attempt without waiting for the cooldown.
+    // returns false for the cooldown window so callers can short-circuit.
+    // State is intentionally process-memory only: a page reload resets the
+    // gate so the user gets a fresh attempt without waiting out the cooldown.
     var sourceFailureGate = (function () {
-        var FAIL_THRESHOLD = 3;
-        var BACKOFF_MS = 5 * 60 * 1000;          // 5 min
+        // Threshold and cooldown are read at FAILURE time, not captured here:
+        // this IIFE runs once at load, and a value captured now could never
+        // reflect a setting changed later in the same page.
         var failureCounts = {};                  // src → consecutive fail count
         var openAt = {};                         // src → Date.now() when re-enabled
         return {
@@ -621,10 +977,11 @@
                 return true;
             },
             onFail: function (src, reason) {
+                var backoffMs = cfg('sourceBackoffMin') * 60000;
                 failureCounts[src] = (failureCounts[src] || 0) + 1;
-                if (failureCounts[src] >= FAIL_THRESHOLD && !openAt[src]) {
-                    openAt[src] = Date.now() + BACKOFF_MS;
-                    console.warn('[fav-fix/' + src + '] gated for ' + (BACKOFF_MS / 60000)
+                if (failureCounts[src] >= cfg('sourceFailThreshold') && !openAt[src]) {
+                    openAt[src] = Date.now() + backoffMs;
+                    console.warn('[fav-fix/' + src + '] gated for ' + (backoffMs / 60000)
                                  + ' min after ' + failureCounts[src] + ' consecutive failures (last: '
                                  + reason + '). Reload the page to retry sooner.');
                 }
@@ -731,13 +1088,13 @@
         //
         // Failure backoff (sourceFailureGate): if a source eats its full
         // per-request timeout (5s) on N consecutive chunks, we mark it
-        // disabled for the next BACKOFF_MS so we don't waste another 5s
+        // disabled for the whole cooldown window so we don't waste another 5s
         // per patch cycle. State is in-memory only — a TM page reload
         // resets and retries everything (typical "is it back yet" check).
         biliplus: {
             name: 'biliplus',
             paginated: false,
-            enabled: function () { return sourceFailureGate.isOpen('biliplus'); },
+            enabled: function () { return cfg('enableBiliplus') && sourceFailureGate.isOpen('biliplus'); },
             fetchAvs: async function (avs) {
                 var out = new Map();
                 if (!avs.length) return out;
@@ -745,12 +1102,14 @@
                 // rare and the user often wants to see whether they fired.
                 console.info('[fav-fix/biliplus] querying', avs.length, 'av(s):',
                              avs.slice(0, 5).join(',') + (avs.length > 5 ? ',…' : ''));
-                var CHUNK = 50;
+                // Snapshotted for the whole sweep so the chunk boundaries and
+                // the progress numbers below stay consistent with each other.
+                var CHUNK = cfg('biliplusChunk');
                 // All 3rd-party archives (biliplus / jijidown) are
                 // best-effort fallbacks; never let a slow archive hold
-                // up patching the DOM. Per-chunk timeout 5s (vs gmGet's 15s
-                // default) keeps the worst case bounded.
-                var REQ_TIMEOUT = 5000;
+                // up patching the DOM. The per-request timeout is deliberately
+                // shorter than gmGet's default, keeping the worst case bounded.
+                var REQ_TIMEOUT = cfg('thirdPartyTimeoutMs');
                 var sawAnySuccess = false;
                 var sawAnyFailure = false;
                 for (var i = 0; i < avs.length; i += CHUNK) {
@@ -804,14 +1163,14 @@
         jijidown: {
             name: 'jijidown',
             paginated: false,
-            enabled: function () { return sourceFailureGate.isOpen('jijidown'); },
+            enabled: function () { return cfg('enableJijidown') && sourceFailureGate.isOpen('jijidown'); },
             fetchAvs: async function (avs) {
                 if (!avs.length) return new Map();
                 console.info('[fav-fix/jijidown] querying', avs.length, 'av(s) (sequential):',
                              avs.slice(0, 5).join(',') + (avs.length > 5 ? ',…' : ''));
                 var out = new Map();
-                // Per-av timeout 5s — see biliplus comment above.
-                var REQ_TIMEOUT = 5000;
+                // Per-av timeout — see the biliplus comment above.
+                var REQ_TIMEOUT = cfg('thirdPartyTimeoutMs');
                 // get_info is two-phase: the FIRST hit for an aid jijidown
                 // hasn't warmed returns a loading stub
                 // ({code:0, msg:'loading', title:'正在加载数据...'} with NO
@@ -822,8 +1181,8 @@
                 // giving up. The phase-2 budget in resolveItems still caps
                 // total wall time, so a folder full of cold aids can't stall
                 // the DOM patch.
-                var LOADING_POLL_MS   = 1200;
-                var LOADING_MAX_POLLS = 2;        // 1 initial request + 2 re-polls
+                var LOADING_POLL_MS   = cfg('jijidownPollMs');
+                var LOADING_MAX_POLLS = cfg('jijidownMaxPolls');   // 1 initial request + this many re-polls
                 var sawAnyResponse = false;
                 for (var i = 0; i < avs.length; i++) {
                     var av = avs[i];
@@ -1015,7 +1374,7 @@
 
     var CACHE_PREFIX  = 'item:av';
     var CACHE_VERSION = 6;   // bumped: +SOURCES.backup (IndexedDB snapshots lead FIELD_PRIORITY)
-    var CACHE_TTL_MS  = 1000 * 60 * 60 * 24 * 30;   // 30 days
+    // → cfg('cacheTtlDays'), default 30.
     // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
     // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
     // by the background runFlapRecovery loop (08-resolver.js), which re-walks
@@ -1025,7 +1384,7 @@
     // re-kicks the loop instead of reusing a stale "still deleted" snapshot.
     // A 30-day lock-in would instead turn one bad android walk into a permanent
     // failure, so these stay short.
-    var CACHE_TTL_DEGENERATE_MS = 1000 * 60 * 10;   // 10 min
+    // → cfg('cacheTtlDegenerateMin'), default 10.
 
     function loadCache(av) {
         var v = GM_getValue(CACHE_PREFIX + av, null);
@@ -1049,7 +1408,8 @@
         // android returned 58/89 on one walk and the dropped items all fell to
         // _no_source). Only a confidently-recovered merge gets the long TTL.
         var ttl = (v._degenerate || v._pending || v._cover_pending)
-                ? CACHE_TTL_DEGENERATE_MS : CACHE_TTL_MS;
+                ? cfg('cacheTtlDegenerateMin') * 60000
+                : cfg('cacheTtlDays') * 86400000;
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
@@ -1104,7 +1464,7 @@
     // Two modes, at most one record per av:
     //   'user' — the user pressed 停止重试. Never expires.
     //   'auto' — runFlapRecovery genuinely gave up on this av. Expires after
-    //            AUTO_NORETRY_TTL_MS, so a folder that merely flapped badly for
+    //            the auto TTL, so a folder that merely flapped badly for
     //            one afternoon is not written off permanently.
     // 'user' overwrites 'auto'; 'auto' must NEVER overwrite 'user' (that would
     // silently downgrade a permanent decision into one expiring in a week).
@@ -1127,7 +1487,9 @@
     // do not try to work around it here.
 
     var NORETRY_PREFIX      = 'noretry:av';
-    var AUTO_NORETRY_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+    // → cfg('autoNoRetryTtlDays'), default 7. Read through autoNoRetryTtlMs()
+    // rather than inlined, because three call sites need the same conversion.
+    function autoNoRetryTtlMs() { return cfg('autoNoRetryTtlDays') * 86400000; }
 
     var _noRetryUser   = new Map();   // av → ms the user pressed stop (permanent)
     var _noRetryAuto   = new Map();   // av → ms the loop gave up (7-day life)
@@ -1158,7 +1520,7 @@
             // way for the UI to show or clear it.
             if (!v || (v.mode !== 'user' && v.mode !== 'auto')) { GM_deleteValue(k); return; }
             if (v.mode === 'user') { _noRetryUser.set(av, v.at || 0); return; }
-            if (now - (v.at || 0) > AUTO_NORETRY_TTL_MS) { GM_deleteValue(k); expired++; return; }
+            if (now - (v.at || 0) > autoNoRetryTtlMs()) { GM_deleteValue(k); expired++; return; }
             _noRetryAuto.set(av, v.at || 0);
         });
         log('noretry: loaded', _noRetryUser.size, 'user +', _noRetryAuto.size,
@@ -1180,7 +1542,7 @@
     }
 
     // The gate for automatic network work: a manual stop, or an auto record the
-    // loop wrote less than AUTO_NORETRY_TTL_MS ago. Expired auto records are
+    // loop wrote less than autoNoRetryTtlMs() ago. Expired auto records are
     // cleared on the spot so the storage entry disappears with the suppression.
     function isRetrySuppressed(av) {
         loadNoRetryIndex();
@@ -1188,7 +1550,7 @@
         if (_noRetryUser.has(av)) return true;
         var at = _noRetryAuto.get(av);
         if (at == null) return false;
-        if (Date.now() - at > AUTO_NORETRY_TTL_MS) { clearNoRetry(av); return false; }
+        if (Date.now() - at > autoNoRetryTtlMs()) { clearNoRetry(av); return false; }
         return true;
     }
 
@@ -1247,7 +1609,7 @@
         });
         _noRetryAuto.forEach(function (at, av) {
             out.push({ av: av, mode: 'auto', at: at, when: at ? new Date(at).toLocaleString() : null,
-                       expiresAt: at ? new Date(at + AUTO_NORETRY_TTL_MS).toLocaleString() : null });
+                       expiresAt: at ? new Date(at + autoNoRetryTtlMs()).toLocaleString() : null });
         });
         return out;
     }
@@ -1376,7 +1738,7 @@
         // deliberately left alone for suppressed avs (nothing was queried, so
         // claiming "已查询但无记录" would be a lie), and the walk's termination
         // test must read activeTodo too: with todoAvs it would never see
-        // allFound for a suppressed av and would run the full MAX_PAGE_WALK.
+        // allFound for a suppressed av and would run the full page-walk cap.
         if (!activeTodo.length && todoAvs.length) {
             log('phase 1 skipped — all', todoAvs.length, 'todo av(s) on the 停止重试 list');
         }
@@ -1390,7 +1752,7 @@
             // whether or not the response actually contains it. "Got no
             // record" = the av wasn't in the response.
             activeTodo.forEach(function (av) { markAttempted(av, src); });
-            var pn = 1, MAX_PN = MAX_PAGE_WALK;
+            var pn = 1, MAX_PN = cfg('maxPageWalk');
             while (pn <= MAX_PN) {
                 var allFound = activeTodo.every(function (av) { return pageItems.has(src + '|' + av); });
                 if (allFound) break;
@@ -1426,7 +1788,7 @@
         // timeouts (5s) bound a single chunk; this bounds the total wall
         // time so a single dead archive can't postpone the DOM patch.
         // If we blow the budget, abort the loop and merge with what we have.
-        var PHASE2_BUDGET_MS = 10000;
+        var PHASE2_BUDGET_MS = cfg('phase2BudgetMs');
         var phase2Deadline = Date.now() + PHASE2_BUDGET_MS;
         for (var s = 0; s < srcOrder.length; s++) {
             var src = srcOrder[s];
@@ -1610,10 +1972,10 @@
     // records an auto stop for whatever it genuinely gave up on — so the same
     // hopeless folder is not re-sampled from scratch on every visit.
     //
-    // Adaptive backoff (FLAP_BACKOFF_MS / FLAP_MAX_DRY in 01-constants.js): the
+    // Adaptive backoff (cfg('flapBackoffMs') / cfg('flapMaxDry')): the
     // `dry` counter drives BOTH cadence and termination. A walk that recovers
     // something resets dry → next walk fires after the short burst gap; a walk
-    // that recovers nothing bumps dry → the gap widens and, at FLAP_MAX_DRY,
+    // that recovers nothing bumps dry → the gap widens and, at maxDry,
     // the loop concludes the leftovers are genuinely filtered and stops. So a
     // still-flapping folder is sampled fast and converges; a truly-deleted set
     // is abandoned after ~7 cheap samples (~4 min) instead of being hammered.
@@ -1685,7 +2047,14 @@
         // them after one walk without ever obtaining the image — for these the
         // merge has to actually carry a cover.
         var needCover = new Set((coverNeeded || []).map(String));
-        var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
+        // The loop's own parameters are snapshotted ONCE, here. This run can
+        // last the better part of an hour; re-reading them mid-flight would
+        // change the rules under a half-finished sampling campaign (a lowered
+        // maxDry would end it retroactively, on evidence gathered under the
+        // old one). An edit lands on the next armed loop instead.
+        var maxDry   = cfg('flapMaxDry');
+        var backoff  = cfg('flapBackoffMs');
+        var deadline = Date.now() + cfg('flapTimeBudgetMin') * 60000;
         var walk = 0, dry = 0;
         // Consecutive walks whose android requests ALL threw — an expired /
         // invalidated access_key (code -101), risk control (-352), a few
@@ -1701,28 +2070,28 @@
         // Did any walk ever obtain a sample? Guards the budget-exhausted exit
         // below for the same reason.
         var everSampled = false;
-        // Did the loop reach a CONCLUSION (dry ran out / the 30-minute budget
-        // did), as opposed to being interrupted? Only a conclusion may write the
+        // Did the loop reach a CONCLUSION (dry ran out / the time budget did),
+        // as opposed to being interrupted? Only a conclusion may write the
         // auto 停止重试 records in the finally. Re-deriving this from `dry` down
         // there would misfire: a folder switch can abort the loop at a moment
-        // when dry happens to sit at FLAP_MAX_DRY, and an interrupted loop is
+        // when dry happens to sit at maxDry, and an interrupted loop is
         // not a verdict on a folder it never finished sampling.
         var gaveUp = false;
         _flapProgress = {
             mediaId: mediaId, startedAt: Date.now(), deadline: deadline,
             total: pending.size, remaining: pending.size,
-            walk: 0, dry: 0, maxDry: FLAP_MAX_DRY,
+            walk: 0, dry: 0, maxDry: maxDry,
             phase: 'walking', page: 0, nextWalkAt: 0, lastRecovered: 0
         };
         try {
             log('flap-bg: start', pending.size, 'candidate(s):',
                 Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
-            while (pending.size && dry < FLAP_MAX_DRY) {
+            while (pending.size && dry < maxDry) {
                 if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
                 // Budget exhausted counts as a conclusion only if android
                 // answered at least once: 30 minutes of failed requests is a
                 // statement about the connection, not about the videos.
-                if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); gaveUp = everSampled; break; }
+                if (Date.now() > deadline)       { log('flap-bg: time budget exhausted'); gaveUp = everSampled; break; }
                 // Drop anything the user stopped WHILE the loop was running:
                 // pressing 停止重试 has to take effect on the next round, not
                 // whenever the loop happens to run out of budget. Only the
@@ -1753,7 +2122,7 @@
                 //     nothing BY CONSTRUCTION; that is not a result either.
                 var sampledOk = false, interrupted = false;
                 var pn = 1;
-                while (pn <= MAX_PAGE_WALK) {
+                while (pn <= cfg('maxPageWalk')) {
                     if (detectMediaId() !== mediaId) { interrupted = true; break; }
                     if (Date.now() > deadline) break;
                     var allFound = true;
@@ -1773,7 +2142,7 @@
                 // Leave before an interrupted walk can be read as a verdict. The
                 // top-of-loop guard would break next round anyway — but only
                 // AFTER this round's dry++ had possibly pushed `dry` to
-                // FLAP_MAX_DRY and stamped auto records on every remaining av of
+                // maxDry and stamped auto records on every remaining av of
                 // the folder the user has just left.
                 if (interrupted) { log('flap-bg: folder changed mid-walk, abort'); break; }
                 if (sampledOk) everSampled = true;
@@ -1810,23 +2179,23 @@
                     // does, but do not count it as one — the candidates were not
                     // sampled, so there is nothing to conclude about them.
                     errRun++;
-                    log('flap-bg walk ' + walk + ': android unreachable (' + errRun + '/' + FLAP_MAX_DRY
+                    log('flap-bg walk ' + walk + ': android unreachable (' + errRun + '/' + maxDry
                         + ' consecutive) — not counted toward dry');
                 } else {
                     errRun = 0;
                     dry++;     // no progress → widen the gap, step toward giving up
-                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
+                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + maxDry + ')');
                 }
                 _flapProgress.dry = dry;
                 _flapProgress.lastRecovered = recovered.length;
                 _flapProgress.remaining = pending.size;
 
-                if (!pending.size || dry >= FLAP_MAX_DRY || errRun >= FLAP_MAX_DRY) {
-                    if (dry >= FLAP_MAX_DRY) gaveUp = true;
+                if (!pending.size || dry >= maxDry || errRun >= maxDry) {
+                    if (dry >= maxDry) gaveUp = true;
                     // An error run stops the loop WITHOUT a verdict: the cards
                     // stay 待重试 and a reload — or 立即重试, or the user simply
                     // logging in again — re-arms the loop exactly as before.
-                    else if (errRun >= FLAP_MAX_DRY) log('flap-bg: stopping for now — ' + errRun
+                    else if (errRun >= maxDry) log('flap-bg: stopping for now — ' + errRun
                         + ' consecutive walk(s) could not reach android; no auto 停止重试 written');
                     break;
                 }
@@ -1837,7 +2206,7 @@
                 // Widen on whichever counter is running: a failing android must
                 // back off just as a fruitless one does, or an outage would be
                 // hammered at the 1s burst gap.
-                var gap = FLAP_BACKOFF_MS[Math.min(Math.max(dry, errRun), FLAP_BACKOFF_MS.length - 1)];
+                var gap = backoff[Math.min(Math.max(dry, errRun), backoff.length - 1)];
                 var until = Date.now() + gap;
                 _flapProgress.phase = 'sleeping';
                 _flapProgress.nextWalkAt = until;
@@ -2536,7 +2905,7 @@
                 var liveReal = (el && el.__favFixReal) || real;
                 tip.innerHTML = buildTipHtml(liveReal);
                 if (!liveReal._pending) stopTipRefresh();
-            }, 1000);
+            }, cfg('tooltipRefreshMs'));
         }
     }
     function hideTip() {
@@ -3425,7 +3794,7 @@
     // Why union-to-convergence: a SINGLE android walk drops a large, variable
     // fraction of invalid items (observed 42/89 = 47% on one walk), so each
     // falsely lands in the diff as "silently dropped" and inflates the banner.
-    // Unioning walks until MISSING_DRY_ROUNDS in a row add nothing new means an
+    // Unioning walks until missingDryRounds in a row add nothing new means an
     // item only counts dropped if EVERY walk missed it — the same multi-sample
     // convergence runFlapRecovery (08-resolver.js) uses to recover flappers. A
     // fixed walk count can't work: the flap rate varies, so it would under- or
@@ -3436,7 +3805,7 @@
     // Returns { avs:Set<avStr>, complete:bool }. `complete` is true ONLY when
     // walk 1 reached a natural has_more=false end (i.e. it saw the whole
     // collection). It is false when walk 1 stopped early — a page error or
-    // the MAX_PAGE_WALK cap. Callers MUST NOT compute a "missing" diff against
+    // the page-walk cap. Callers MUST NOT compute a "missing" diff against
     // an incomplete walk: the unwalked tail would be falsely flagged as
     // silently-dropped (the >600-item false-positive this `complete` flag
     // exists to prevent). The extra union walks never lower `complete`; they
@@ -3458,26 +3827,35 @@
         // android (eventually-consistent) → union INDEPENDENT walks until the
         // union STOPS GROWING; public (stable) → one walk. The `dry` counter is
         // the convergence signal: a walk that adds a new av resets it, a walk
-        // that adds nothing bumps it, and MISSING_DRY_ROUNDS consecutive 0-new
-        // walks means the union has saturated (we've seen everything android
-        // will return for this folder). Capped at MISSING_MAX_WALKS.
+        // that adds nothing bumps it, and this many consecutive 0-new walks
+        // means the union has saturated (we've seen everything android will
+        // return for this folder). Capped by the walk limit.
+        //
+        // Snapshotted for the duration of the union, for the same reason
+        // runFlapRecovery snapshots its own: the convergence test has to mean
+        // the same thing on the last walk as it did on the first.
+        var maxWalks  = cfg('missingMaxWalks');
+        var dryRounds = cfg('missingDryRounds');
+        var maxPage   = cfg('maxPageWalk');
         var isFlappy = (srcName === 'android');
         var complete = false;
         var walk = 0, dry = 0;
-        while (walk < (isFlappy ? MISSING_MAX_WALKS : 1) && dry < MISSING_DRY_ROUNDS) {
+        while (walk < (isFlappy ? maxWalks : 1) && dry < dryRounds) {
             walk++;
             if (walk > 1) {
                 // Gap so each walk is an INDEPENDENT server sample — back-to-back
                 // requests can replay the same eventually-consistent snapshot;
                 // the flap is observable on a ~seconds cadence. Reuse one short
-                // FLAP_BACKOFF_MS step (NOT the indexed widening one — this is a
+                // flapBackoffMs step (NOT the indexed widening one — this is a
                 // one-shot baseline, not the live retry's load-shaping).
-                await new Promise(function (r) { setTimeout(r, FLAP_BACKOFF_MS[1]); });
+                var ladder = cfg('flapBackoffMs');
+                var gap = ladder[Math.min(1, ladder.length - 1)];
+                await new Promise(function (r) { setTimeout(r, gap); });
                 if (detectMediaId() !== mediaId) break;   // folder switched mid-union
             }
             var before = collected.size;
             var walkComplete = false;
-            for (var pn = 1; pn <= MAX_PAGE_WALK; pn++) {
+            for (var pn = 1; pn <= maxPage; pn++) {
                 if (detectMediaId() !== mediaId) break;
                 var page;
                 try {
@@ -3674,14 +4052,14 @@
                 }
                 if (!phase1.complete) {
                     // The walk did NOT reach a natural has_more=false end —
-                    // it was cut short by the MAX_PAGE_WALK cap or a page
+                    // it was cut short by the page-walk cap or a page
                     // error. The unwalked tail would be falsely reported as
                     // "silently dropped" (the >600-item false positive). Skip
                     // WITHOUT marking shown: the {avs,complete} result is
                     // cached, so repeat ticks return instantly and re-skip;
                     // a manual rescan (which clears the cache) can retry.
                     log('detectMissing: phase-1 walk incomplete (declared=' + all.length
-                        + ' walked=' + phase1Avs.size + ', cap=' + MAX_PAGE_WALK
+                        + ' walked=' + phase1Avs.size + ', cap=' + cfg('maxPageWalk')
                         + ' pages) — skipping gap detection to avoid false positives');
                     return;
                 }
@@ -3797,9 +4175,9 @@
                 // Safety net: if neither event fires (browser cached
                 // the new src because the same hdslb URL was loaded
                 // earlier this session, or some other edge), the
-                // spinner would hang forever. 4s is generous for
-                // hdslb but short enough to not feel broken.
-                setTimeout(finish, 4000);
+                // spinner would hang forever. The default is generous
+                // for hdslb but short enough to not feel broken.
+                setTimeout(finish, cfg('coverLoadTimeoutMs'));
                 // Third arg = av: lets patchCover fall back to the local
                 // backup's cover Blob if this URL 404s (09-dom.js).
                 patchCover(img, real.cover, real.oid != null ? String(real.oid) : null);
@@ -4028,7 +4406,7 @@
         pendingTick = setTimeout(function () {
             pendingTick = null;
             patchOnce().catch(function (e) { warn('patchOnce threw:', e); });
-        }, 400);
+        }, cfg('patchDebounceMs'));
     }
 
     function startObserver() {
@@ -4049,7 +4427,7 @@
                 setTimeout(function () {
                     var mid = detectMediaId();
                     if (mid) detectMissingAndRender(mid);
-                }, 1500);
+                }, cfg('spaSwitchDelayMs'));
             }
             schedule();
         });
@@ -4124,14 +4502,15 @@
     var BACKUP_STORE_ITEMS = 'items';
     var BACKUP_STORE_META  = 'meta';
 
-    // Walk limits. 500 pages x ps=20 = 10000 items: far above MAX_PAGE_WALK
-    // (which bounds the *rescue* walks, where a long walk delays a DOM patch)
+    // Walk limits. 500 pages x ps=20 = 10000 items: far above the rescue-walk
+    // cap (cfg('maxPageWalk'), where a long walk delays a DOM patch)
     // because a backup is an explicit, user-initiated, one-off operation and
     // truncating it silently loses data the user asked us to keep.
-    var BACKUP_MAX_PAGES        = 500;
-    var BACKUP_PAGE_DELAY_MS    = 300;   // politeness gap between folder pages
-    var BACKUP_BLOB_CONCURRENCY = 3;     // parallel cover downloads
-    var BACKUP_PROGRESS_EVERY   = 3;     // toast every N pages (page 1 always)
+    // → cfg('backupMaxPages'), default 500.
+    // → cfg('backupPageDelayMs'), default 300 — politeness gap between pages.
+    // → cfg('backupBlobConcurrency'), default 3 — parallel cover downloads.
+    // → cfg('backupProgressEvery'), default 3 — toast every N pages (page 1
+    //   always).
 
     // ─── IndexedDB plumbing ─────────────────────────────────────────────
     // Lazy single open, promise-wrapped. No third-party wrapper library: the
@@ -4441,8 +4820,9 @@
         }
         // Bounded parallelism for the cover downloads: serial is needlessly
         // slow on a 200-item folder, unbounded hammers the CDN.
-        for (var j = 0; j < tasks.length; j += BACKUP_BLOB_CONCURRENCY) {
-            var chunk = tasks.slice(j, j + BACKUP_BLOB_CONCURRENCY);
+        var concurrency = cfg('backupBlobConcurrency');
+        for (var j = 0; j < tasks.length; j += concurrency) {
+            var chunk = tasks.slice(j, j + concurrency);
             await Promise.all(chunk.map(function (t) { return commitBackupRecord(t, stats); }));
         }
     }
@@ -4474,7 +4854,7 @@
         try {
             toast('开始备份当前收藏夹');
             var pn = 1;
-            while (pn <= BACKUP_MAX_PAGES) {
+            while (pn <= cfg('backupMaxPages')) {
                 // Walk `public` DIRECTLY, bypassing ensurePage/pageCache. Same
                 // reasoning as the flap loop (AGENTS.md gotcha 16b): we want a
                 // fresh server sample, and a long backup walk must not poison
@@ -4500,12 +4880,12 @@
                 // Every page would out-run the toast's own 4.5s lifetime and
                 // stack overlapping banners; every 3rd page keeps the feedback
                 // continuous without piling up.
-                if (pn % BACKUP_PROGRESS_EVERY === 0) {
+                if (pn % cfg('backupProgressEvery') === 0) {
                     toast('备份中：第 ' + pn + ' 页，已处理 ' + stats.total_seen + ' 项');
                 }
                 if (!page.has_more) break;
                 pn++;
-                await backupSleep(BACKUP_PAGE_DELAY_MS);
+                await backupSleep(cfg('backupPageDelayMs'));
             }
             if (!aborted) {
                 var summary = '备份完成：新增 ' + stats.backed + ' · 更新 ' + stats.updated
@@ -4700,8 +5080,8 @@
     //     CARD_SELECTOR, so the MutationObserver's card scan (14-orchestrate.js)
     //     never mistakes a row for a bilibili video card.
 
-    var MGR_PAGE_SIZE          = 20;
-    var MGR_SEARCH_DEBOUNCE_MS = 300;
+    // → cfg('mgrPageSize'), default 20.
+    // → cfg('mgrSearchDebounceMs'), default 300.
 
     var _mgrHost    = null;   // overlay root; non-null means the panel is open
     var _mgrState   = null;   // see openBackupManager() for the shape
@@ -5104,10 +5484,11 @@
         body.innerHTML = '';
 
         var total = s.filtered.length;
-        var pages = Math.max(1, Math.ceil(total / MGR_PAGE_SIZE));
+        var pageSize = cfg('mgrPageSize');
+        var pages = Math.max(1, Math.ceil(total / pageSize));
         if (s.page > pages) s.page = pages;
-        var start = (s.page - 1) * MGR_PAGE_SIZE;
-        var slice = s.filtered.slice(start, start + MGR_PAGE_SIZE);
+        var start = (s.page - 1) * pageSize;
+        var slice = s.filtered.slice(start, start + pageSize);
 
         if (!s.index.length) {
             body.innerHTML = '<div class="fav-fix-mgr-note">暂无备份数据<br>'
@@ -5195,7 +5576,7 @@
         // Recompute rather than blanket-enable on release: a delete that ends
         // without a re-render (the failure path) must not leave 下一页 clickable
         // on the last page.
-        var pages = Math.max(1, Math.ceil(s.filtered.length / MGR_PAGE_SIZE));
+        var pages = Math.max(1, Math.ceil(s.filtered.length / cfg('mgrPageSize')));
         // s.busy is already assigned above, so mgrLocked() sees this release.
         // Same computation as in mgrRenderList: a delete that ends without a
         // re-render must not hand the footer buttons back while another long
@@ -5616,7 +5997,7 @@
                     s.query = s.els.search.value;
                     mgrApplyFilter();
                     mgrRenderList();
-                }, MGR_SEARCH_DEBOUNCE_MS);
+                }, cfg('mgrSearchDebounceMs'));
             });
             s.els.folder.addEventListener('change', function () {
                 if (s.busy) { s.els.folder.value = s.folder; return; }
@@ -7102,6 +7483,12 @@
         importPickBackupFile();
     }
 
+    function cmdSettings() {
+        // Synchronous and self-contained: the modal owns its own lifecycle
+        // and re-focuses instead of stacking when it is already open.
+        openSettings();
+    }
+
     function cmdAuthStatus() {
         var a = getAuth();
         var age = a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null;
@@ -7124,6 +7511,7 @@
         GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', cmdBackupFolder);
         GM_registerMenuCommand('fav-fix：管理备份', cmdManageBackup);
         GM_registerMenuCommand('fav-fix：导入备份文件', cmdImportBackup);
+        GM_registerMenuCommand('fav-fix：设置', cmdSettings);
         GM_registerMenuCommand('fav-fix：查看登录状态', cmdAuthStatus);
     } catch (e) { warn('menu register failed', e); }
 
@@ -7144,6 +7532,10 @@
     //   press + release without moving → toggle the menu
     //   menu level 0  → categories; level 1 → that category's commands,
     //                   with 返回 as the first row (the user's stated shape)
+    //   a level-0 entry carrying `run` instead of `items` is a DIRECT
+    //                   action — no chevron, no second level. Reserved for
+    //                   a destination that is a whole surface of its own
+    //                   (设置), which a one-item category would misrepresent.
     //
     // ── Geometry constraint (learned the hard way elsewhere) ──
     // The menu MUST be position:absolute, anchored on the button. If it sat
@@ -7173,6 +7565,7 @@
     function fabAuthHint()    { var a = getAuth(); return a.access_key ? (a.mode || '已登录') : '未登录'; }
     function fabNoRetryHint() { var c = noRetryCounts(); var n = c.user + c.auto; return n ? n + ' 项' : '无'; }
     function fabPageHint()    { var n = pendingAvsOnPage().length; return n ? n + ' 项' : '无'; }
+    function fabSettingsHint(){ var n = Object.keys(cfgChanged()).length; return n ? n + ' 项已改' : '默认'; }
 
     // The menu tree. Data, not code: one place to read what the script can do.
     // `danger: true` paints the row red — reserved for the two commands that
@@ -7200,7 +7593,8 @@
         { id: 'maint', label: '维护与调试', items: [
             { label: '开关调试日志',          run: cmdToggleDebug, hint: fabDebugHint },
             { label: '清除所有缓存并刷新页面', run: cmdClearAllCache, danger: true }
-        ] }
+        ] },
+        { id: 'settings', label: '设置', run: cmdSettings, hint: fabSettingsHint }
     ];
 
     var FAB_ICON_IDLE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>';
@@ -7388,11 +7782,19 @@
             list.className = 'fav-fix-fab-list';
             for (i = 0; i < FAB_MENU.length; i++) {
                 (function (cat) {
-                    var row = fabRow('fav-fix-fab-row', cat.label, fabHint(cat.hint), '›');
+                    // No chevron on a direct action: the chevron is this
+                    // menu's only promise about what a click does.
+                    var isAction = typeof cat.run === 'function';
+                    var row = fabRow('fav-fix-fab-row', cat.label, fabHint(cat.hint),
+                                     isAction ? '' : '›');
                     row.addEventListener('click', function (e) {
                         e.preventDefault(); e.stopPropagation();
-                        _fabCat = cat.id;
-                        fabRenderMenu();
+                        if (!isAction) { _fabCat = cat.id; fabRenderMenu(); return; }
+                        // Same close-first / catch-the-throw contract as the
+                        // level-1 rows below.
+                        fabClose();
+                        try { cat.run(); }
+                        catch (err) { warn('fab: command threw', err); toast('操作失败：' + (err && err.message), 'err'); }
                     });
                     list.appendChild(row);
                 })(FAB_MENU[i]);
@@ -7407,7 +7809,9 @@
         }
 
         var cat = null;
-        for (i = 0; i < FAB_MENU.length; i++) if (FAB_MENU[i].id === _fabCat) cat = FAB_MENU[i];
+        for (i = 0; i < FAB_MENU.length; i++) {
+            if (FAB_MENU[i].id === _fabCat && FAB_MENU[i].items) cat = FAB_MENU[i];
+        }
         // The open category vanished (only reachable if FAB_MENU changed under
         // us). Fall back to the top level rather than rendering an empty menu.
         if (!cat) { _fabCat = null; fabRenderMenu(); return; }
@@ -7582,10 +7986,442 @@
         });
     }
 
+    // ─── Settings modal ─────────────────────────────────────────────────
+    //
+    // Presentation for SETTINGS_SCHEMA (01a-settings.js) and nothing else. It
+    // owns no defaults, no bounds and no validation: every row is generated
+    // from a schema entry, every edit goes through cfgSet(), and every error
+    // message shown here was produced by cfgCoerce(). Adding a tunable must
+    // never require touching this file.
+    //
+    // ── Commit model ──
+    // There is no 保存 button. Each field commits on `change` (blur or Enter)
+    // and takes effect immediately, because every consumer reads cfg() at the
+    // point of use. A rejected value is NOT written and NOT reverted: the
+    // typed text stays put under an inline error so the user can correct it
+    // rather than watch their input vanish.
+    //
+    // ── Layering ──
+    // z-index sits one above the backup manager (15b), which is itself above
+    // the FAB. The two panels are independent overlays and can legitimately be
+    // open at once — settings reached from the Tampermonkey menu while the
+    // manager sits behind it — so the newer one has to win.
+    //
+    // Node class names are prefixed `fav-fix-set-` and match none of
+    // CARD_SELECTOR, so the MutationObserver's card scan never mistakes a row
+    // for a bilibili video card.
+
+    var _setHost = null;     // overlay root; non-null means the modal is open
+    var _setGroup = null;    // id of the visible group
+    var _setStylesInjected = false;
+
+    function ensureSettingsStyles() {
+        if (_setStylesInjected) return;
+        _setStylesInjected = true;
+        var st = document.createElement('style');
+        st.id = '__fav_fix_set_styles';
+        st.textContent = [
+            // Same design language as the backup manager: white panel, #fb7299
+            // reserved for the one accent, neutral grays for everything else.
+            '.fav-fix-set-overlay {',
+            '  position: fixed; inset: 0; z-index: 2147483647;',
+            '  display: flex; align-items: center; justify-content: center;',
+            '  background: rgba(24,25,28,.5);',
+            '  font: 13px/1.5 -apple-system,"PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;',
+            '  color: #18191c;',
+            '}',
+            '.fav-fix-set-panel {',
+            '  width: min(760px, 92vw); max-height: 86vh;',
+            '  display: flex; flex-direction: column;',
+            '  background: #fff; border-radius: 10px; overflow: hidden;',
+            '  box-shadow: 0 16px 48px rgba(0,0,0,.28);',
+            '}',
+
+            '.fav-fix-set-head {',
+            '  flex: none; display: flex; align-items: center; gap: 8px;',
+            '  padding: 14px 18px; border-bottom: 1px solid #f1f2f3; background: #fafbfc;',
+            '}',
+            '.fav-fix-set-head .t { font-size: 15px; font-weight: 600; }',
+            '.fav-fix-set-head .v { font-size: 11px; color: #9499a0; }',
+            '.fav-fix-set-head .n { margin-left: auto; font-size: 12px; color: #61666d; }',
+
+            '.fav-fix-set-btn {',
+            '  border: 1px solid #e3e5e7; background: #fff; color: #18191c;',
+            '  border-radius: 6px; padding: 5px 12px; cursor: pointer;',
+            '  font-size: 12px; line-height: 1.6; transition: background .12s, border-color .12s;',
+            '}',
+            '.fav-fix-set-btn:hover { background: #f6f7f8; border-color: #d0d3d6; }',
+            '.fav-fix-set-btn[disabled] { opacity: .45; cursor: default; }',
+            '.fav-fix-set-btn[disabled]:hover { background: #fff; border-color: #e3e5e7; }',
+            '.fav-fix-set-btn.warn { color: #e13c53; border-color: rgba(225,60,83,.35); }',
+            '.fav-fix-set-btn.warn:hover { background: rgba(225,60,83,.06); border-color: rgba(225,60,83,.55); }',
+
+            '.fav-fix-set-tabs {',
+            '  flex: none; display: flex; gap: 2px; padding: 0 12px;',
+            '  border-bottom: 1px solid #f1f2f3; overflow-x: auto;',
+            '}',
+            '.fav-fix-set-tab {',
+            '  flex: none; padding: 10px 12px; cursor: pointer; color: #61666d;',
+            '  font-size: 13px; border-bottom: 2px solid transparent;',
+            '  transition: color .12s, border-color .12s;',
+            '}',
+            '.fav-fix-set-tab:hover { color: #18191c; }',
+            '.fav-fix-set-tab.on { color: #fb7299; border-bottom-color: #fb7299; font-weight: 600; }',
+            // A dot, not a number: the tab strip answers "is anything changed
+            // in there", and the exact count is already in the header.
+            '.fav-fix-set-tab .dot[hidden] { display: none; }',
+            '.fav-fix-set-tab .dot {',
+            '  display: inline-block; width: 5px; height: 5px; margin-left: 5px;',
+            '  border-radius: 50%; background: #fb7299; vertical-align: middle;',
+            '}',
+
+            '.fav-fix-set-body { flex: 1 1 auto; overflow-y: auto; padding: 4px 18px 12px; }',
+            '.fav-fix-set-row {',
+            '  display: flex; align-items: flex-start; gap: 16px;',
+            '  padding: 14px 0; border-bottom: 1px solid #f4f5f6;',
+            '}',
+            '.fav-fix-set-row:last-child { border-bottom: 0; }',
+            '.fav-fix-set-main { flex: 1 1 auto; min-width: 0; }',
+            '.fav-fix-set-label { font-size: 13px; font-weight: 600; }',
+            '.fav-fix-set-tag {',
+            '  margin-left: 6px; padding: 0 5px; border-radius: 3px; vertical-align: 1px;',
+            '  font-size: 10px; font-weight: 400; color: #fb7299; background: rgba(251,114,153,.1);',
+            '}',
+            '.fav-fix-set-desc { margin-top: 3px; font-size: 12px; color: #9499a0; }',
+            '.fav-fix-set-err { margin-top: 4px; font-size: 12px; color: #e13c53; }',
+            '.fav-fix-set-ctl { flex: none; display: flex; align-items: center; gap: 6px; padding-top: 1px; }',
+            '.fav-fix-set-in {',
+            '  width: 110px; box-sizing: border-box;',
+            '  border: 1px solid #e3e5e7; border-radius: 6px; padding: 5px 8px;',
+            '  font: inherit; font-size: 13px; color: #18191c; background: #fff;',
+            '  text-align: right; transition: border-color .12s;',
+            '}',
+            '.fav-fix-set-in.wide { width: 236px; text-align: left; }',
+            '.fav-fix-set-in:focus { outline: none; border-color: #fb7299; }',
+            '.fav-fix-set-in.bad { border-color: #e13c53; }',
+            '.fav-fix-set-unit { flex: none; width: 32px; font-size: 12px; color: #9499a0; }',
+            '.fav-fix-set-rst {',
+            '  flex: none; width: 44px; border: 0; background: none; padding: 0;',
+            '  font: inherit; font-size: 12px; color: #9499a0; cursor: pointer;',
+            '}',
+            '.fav-fix-set-rst:hover { color: #fb7299; }',
+            '.fav-fix-set-rst[hidden] { visibility: hidden; display: block; }',
+
+            // Switch. A real <button role="switch"> rather than a restyled
+            // checkbox: keyboard behaviour and aria-checked come for free.
+            '.fav-fix-set-sw {',
+            '  width: 40px; height: 22px; flex: none; padding: 0; cursor: pointer;',
+            '  border: 1px solid #e3e5e7; border-radius: 11px; background: #f1f2f3;',
+            '  position: relative; transition: background .15s, border-color .15s;',
+            '}',
+            '.fav-fix-set-sw::after {',
+            '  content: ""; position: absolute; top: 2px; left: 2px;',
+            '  width: 16px; height: 16px; border-radius: 50%; background: #fff;',
+            '  box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .15s;',
+            '}',
+            '.fav-fix-set-sw[aria-checked="true"] { background: #fb7299; border-color: #fb7299; }',
+            '.fav-fix-set-sw[aria-checked="true"]::after { transform: translateX(18px); }',
+
+            '.fav-fix-set-foot {',
+            '  flex: none; display: flex; align-items: center; gap: 8px;',
+            '  padding: 12px 18px; border-top: 1px solid #f1f2f3; background: #fafbfc;',
+            '}',
+            '.fav-fix-set-note { margin-left: auto; font-size: 11px; color: #9499a0; text-align: right; }'
+        ].join('\n');
+        (document.head || document.documentElement).appendChild(st);
+    }
+
+    // ── Row rendering ───────────────────────────────────────────────────
+
+    // How many settings currently differ from their shipped default, overall
+    // and per group. Recomputed on every commit; the whole set is ~30 entries
+    // read from a memo, so there is nothing to cache.
+    function setChangedCounts() {
+        var out = { total: 0, byGroup: {} };
+        for (var i = 0; i < SETTINGS_SCHEMA.length; i++) {
+            var e = SETTINGS_SCHEMA[i];
+            if (cfgIsDefault(e.key)) continue;
+            out.total++;
+            out.byGroup[e.group] = (out.byGroup[e.group] || 0) + 1;
+        }
+        return out;
+    }
+
+    // The text a field shows for a value. An intlist is edited as the comma
+    // list the user would write, not as a JSON array.
+    function setDisplay(e, v) {
+        return Array.isArray(v) ? v.join(', ') : String(v);
+    }
+
+    function setBuildRow(e) {
+        var row = document.createElement('div');
+        row.className = 'fav-fix-set-row';
+
+        var main = document.createElement('div');
+        main.className = 'fav-fix-set-main';
+        var lab = document.createElement('div');
+        lab.className = 'fav-fix-set-label';
+        lab.textContent = e.label;
+        var tag = document.createElement('span');
+        tag.className = 'fav-fix-set-tag';
+        tag.textContent = '已修改';
+        lab.appendChild(tag);
+        var desc = document.createElement('div');
+        desc.className = 'fav-fix-set-desc';
+        desc.textContent = e.desc;
+        var err = document.createElement('div');
+        err.className = 'fav-fix-set-err';
+        err.hidden = true;
+        main.appendChild(lab); main.appendChild(desc); main.appendChild(err);
+
+        var ctl = document.createElement('div');
+        ctl.className = 'fav-fix-set-ctl';
+
+        var rst = document.createElement('button');
+        rst.type = 'button';
+        rst.className = 'fav-fix-set-rst';
+        rst.textContent = '重置';
+        rst.title = '恢复默认值 ' + setDisplay(e, e.def);
+
+        // Repaint the row's own state (tag, reset affordance, error) plus the
+        // two aggregate readouts. Every commit path ends here, so "what the
+        // row looks like" is defined in exactly one place.
+        function refresh(errorText) {
+            var isDef = cfgIsDefault(e.key);
+            tag.hidden = isDef;
+            rst.hidden = isDef;
+            err.hidden = !errorText;
+            err.textContent = errorText || '';
+            setRefreshCounts();
+        }
+
+        var input = null, sw = null;
+
+        if (e.type === 'bool') {
+            sw = document.createElement('button');
+            sw.type = 'button';
+            sw.className = 'fav-fix-set-sw';
+            sw.setAttribute('role', 'switch');
+            sw.setAttribute('aria-label', e.label);
+            sw.setAttribute('aria-checked', cfg(e.key) ? 'true' : 'false');
+            sw.addEventListener('click', function () {
+                var next = sw.getAttribute('aria-checked') !== 'true';
+                var r = cfgSet(e.key, next);
+                if (!r.ok) { refresh(r.error); return; }
+                sw.setAttribute('aria-checked', r.value ? 'true' : 'false');
+                refresh('');
+            });
+            ctl.appendChild(sw);
+            // Keeps the switch column aligned with the input column above it.
+            var pad = document.createElement('span');
+            pad.className = 'fav-fix-set-unit';
+            ctl.appendChild(pad);
+        } else {
+            input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'fav-fix-set-in' + (e.type === 'intlist' ? ' wide' : '');
+            if (e.type === 'int') {
+                input.setAttribute('inputmode', 'numeric');
+                input.title = '取值范围 ' + e.min + ' – ' + e.max;
+            }
+            input.value = setDisplay(e, cfg(e.key));
+            input.addEventListener('change', function () {
+                var r = cfgSet(e.key, input.value);
+                if (!r.ok) {
+                    // Deliberately keeps the rejected text: replacing it with
+                    // the stored value would delete the user's work and leave
+                    // them guessing which character was wrong.
+                    input.classList.add('bad');
+                    refresh(r.error);
+                    return;
+                }
+                input.classList.remove('bad');
+                // Normalizes what was typed ("1000,2000" → "1000, 2000") so the
+                // field shows the value as it was actually stored.
+                input.value = setDisplay(e, r.value);
+                refresh('');
+            });
+            // Enter commits. Without this the value only lands on blur, and a
+            // user who types and closes the panel loses the edit.
+            input.addEventListener('keydown', function (ev) {
+                if (ev.key === 'Enter') { ev.preventDefault(); input.blur(); }
+            });
+            ctl.appendChild(input);
+            var unit = document.createElement('span');
+            unit.className = 'fav-fix-set-unit';
+            unit.textContent = e.unit || '';
+            ctl.appendChild(unit);
+        }
+
+        rst.addEventListener('click', function () {
+            var r = cfgReset(e.key);
+            if (!r.ok) { refresh(r.error); return; }
+            if (input) { input.value = setDisplay(e, r.value); input.classList.remove('bad'); }
+            if (sw) sw.setAttribute('aria-checked', r.value ? 'true' : 'false');
+            refresh('');
+        });
+        ctl.appendChild(rst);
+
+        row.appendChild(main);
+        row.appendChild(ctl);
+        refresh('');
+        return row;
+    }
+
+    // The header count and the per-tab dots. Split out because a commit deep
+    // inside one row has to move readouts that live outside it.
+    function setRefreshCounts() {
+        if (!_setHost) return;
+        var c = setChangedCounts();
+        var n = _setHost.querySelector('.fav-fix-set-count');
+        if (n) n.textContent = c.total ? ('已修改 ' + c.total + ' 项') : '全部为默认值';
+        var tabs = _setHost.querySelectorAll('.fav-fix-set-tab');
+        for (var i = 0; i < tabs.length; i++) {
+            var gid = tabs[i].getAttribute('data-group');
+            var dot = tabs[i].querySelector('.dot');
+            if (dot) dot.hidden = !c.byGroup[gid];
+        }
+        var resetAll = _setHost.querySelector('.fav-fix-set-resetall');
+        if (resetAll) resetAll.disabled = !c.total;
+        var resetGrp = _setHost.querySelector('.fav-fix-set-resetgrp');
+        if (resetGrp) resetGrp.disabled = !c.byGroup[_setGroup];
+    }
+
+    function setRenderBody() {
+        if (!_setHost) return;
+        var body = _setHost.querySelector('.fav-fix-set-body');
+        body.textContent = '';
+        for (var i = 0; i < SETTINGS_SCHEMA.length; i++) {
+            if (SETTINGS_SCHEMA[i].group !== _setGroup) continue;
+            body.appendChild(setBuildRow(SETTINGS_SCHEMA[i]));
+        }
+        body.scrollTop = 0;
+        var tabs = _setHost.querySelectorAll('.fav-fix-set-tab');
+        for (var t = 0; t < tabs.length; t++) {
+            tabs[t].classList.toggle('on', tabs[t].getAttribute('data-group') === _setGroup);
+        }
+        setRefreshCounts();
+    }
+
+    // ── Open / close ────────────────────────────────────────────────────
+
+    function closeSettings() {
+        if (!_setHost) return;
+        document.removeEventListener('keydown', setOnKeydown, true);
+        _setHost.remove();
+        _setHost = null;
+    }
+
+    function setOnKeydown(ev) {
+        if (ev.key !== 'Escape' || !_setHost) return;
+        ev.stopPropagation();
+        closeSettings();
+    }
+
+    function openSettings() {
+        // Already open: bring the user back to the panel rather than stacking a
+        // second copy over the first (the TM menu can fire while it is open).
+        if (_setHost) { _setHost.querySelector('.fav-fix-set-panel').focus(); return; }
+        ensureSettingsStyles();
+        _setGroup = _setGroup || SETTINGS_GROUPS[0].id;
+
+        var host = document.createElement('div');
+        host.className = 'fav-fix-set-overlay';
+        host.setAttribute('data-fav-fix-settings', '1');
+
+        var panel = document.createElement('div');
+        panel.className = 'fav-fix-set-panel';
+        panel.setAttribute('tabindex', '-1');
+
+        var head = document.createElement('div');
+        head.className = 'fav-fix-set-head';
+        head.innerHTML = '<span class="t">设置</span><span class="v"></span>'
+                       + '<span class="n fav-fix-set-count"></span>';
+        head.querySelector('.v').textContent = CORE_VERSION;
+        var closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'fav-fix-set-btn';
+        closeBtn.textContent = '关闭';
+        closeBtn.addEventListener('click', closeSettings);
+        head.appendChild(closeBtn);
+
+        var tabs = document.createElement('div');
+        tabs.className = 'fav-fix-set-tabs';
+        for (var i = 0; i < SETTINGS_GROUPS.length; i++) {
+            (function (g) {
+                var tab = document.createElement('div');
+                tab.className = 'fav-fix-set-tab';
+                tab.setAttribute('data-group', g.id);
+                tab.textContent = g.label;
+                var dot = document.createElement('span');
+                dot.className = 'dot';
+                dot.hidden = true;
+                tab.appendChild(dot);
+                tab.addEventListener('click', function () {
+                    _setGroup = g.id;
+                    setRenderBody();
+                });
+                tabs.appendChild(tab);
+            })(SETTINGS_GROUPS[i]);
+        }
+
+        var body = document.createElement('div');
+        body.className = 'fav-fix-set-body';
+
+        var foot = document.createElement('div');
+        foot.className = 'fav-fix-set-foot';
+        var rg = document.createElement('button');
+        rg.type = 'button';
+        rg.className = 'fav-fix-set-btn fav-fix-set-resetgrp';
+        rg.textContent = '恢复本组默认值';
+        rg.addEventListener('click', function () {
+            var n = cfgResetAll(_setGroup);
+            setRenderBody();
+            toast(n ? ('已恢复 ' + n + ' 项默认值') : '本组已全部为默认值', 'ok');
+        });
+        var ra = document.createElement('button');
+        ra.type = 'button';
+        ra.className = 'fav-fix-set-btn warn fav-fix-set-resetall';
+        ra.textContent = '恢复全部默认值';
+        ra.addEventListener('click', function () {
+            var n = cfgResetAll();
+            setRenderBody();
+            toast(n ? ('已恢复 ' + n + ' 项默认值') : '当前已全部为默认值', 'ok');
+        });
+        var note = document.createElement('div');
+        note.className = 'fav-fix-set-note';
+        // Both facts belong here rather than in a per-row caption: they are
+        // properties of the settings mechanism, not of any one setting. The
+        // cross-tab limit is the same one the 停止重试 list carries (07a).
+        note.textContent = '修改即时生效，无需保存；其他已打开的标签页需刷新后才会读到新值';
+        foot.appendChild(rg); foot.appendChild(ra); foot.appendChild(note);
+
+        panel.appendChild(head);
+        panel.appendChild(tabs);
+        panel.appendChild(body);
+        panel.appendChild(foot);
+        host.appendChild(panel);
+
+        // Backdrop click closes; a click that started inside the panel must
+        // not, or dragging a text selection out of a field would shut it.
+        host.addEventListener('mousedown', function (ev) {
+            if (ev.target === host) closeSettings();
+        });
+
+        document.body.appendChild(host);
+        _setHost = host;
+        setRenderBody();
+        document.addEventListener('keydown', setOnKeydown, true);
+        panel.focus();
+    }
     // ─── Boot ───────────────────────────────────────────────────────────
 
     function boot() {
         if (!isFavPage()) { log('not a fav page, idle'); return; }
+        // Settings first: every `apply` hook runs here, so a mirrored value
+        // (DEBUG) is correct before the first log line rather than from
+        // whenever someone first opens the settings modal.
+        cfgBoot();
         log('booting on', location.href);
         // Build the 停止重试 index before the first patch pass, so the very
         // first render already knows which cards are switched off. Every
@@ -7601,12 +8437,12 @@
         // detectMissingAndRender at its END, and patchOnce early-returns
         // when there are no invalid cards. Without this boot-trigger,
         // collections with NO visible invalid cards but with "ghost"
-        // (silently-dropped) items wouldn't show a banner at all. Delay
-        // 1500ms so bilibili's SPA has time to settle the URL and DOM.
+        // (silently-dropped) items wouldn't show a banner at all. The delay
+        // gives bilibili's SPA time to settle the URL and DOM.
         setTimeout(function () {
             var mid = detectMediaId();
             if (mid) detectMissingAndRender(mid);
-        }, 1500);
+        }, cfg('spaSwitchDelayMs'));
     }
 
     if (document.readyState === 'loading') {
@@ -7758,6 +8594,19 @@
         // session cannot produce a state the UI could not have produced.
         // clearAll() repaints (schedule) instead of reloading — no card's
         // cached snapshot changed, only which badge belongs on it.
+        // The settings registry (01a-settings.js). get/set/reset go through
+        // the SAME cfgSet path the modal uses, so a console session cannot
+        // store a value the modal would have refused. set() returns the
+        // {ok, value} | {ok:false, error} result rather than throwing.
+        settings: {
+            open:    openSettings,
+            get:     cfg,
+            set:     cfgSet,
+            reset:   cfgReset,
+            resetAll: cfgResetAll,
+            changed: cfgChanged,
+            schema:  function () { return SETTINGS_SCHEMA.slice(); }
+        },
         fab: {
             resetPosition: fabResetPosition,
             open:  function () { fabOpen();  return 'fab menu opened'; },
@@ -7814,6 +8663,9 @@
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
                 '__biliFavFix.backup.importFile(f) merge an exported .zip (File/Blob) back into the store',
                 '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
+                '__biliFavFix.settings.open()      open the settings panel',
+                '__biliFavFix.settings.get(key)    read one setting; .set(key, v) / .reset(key) write it',
+                '__biliFavFix.settings.changed()   every setting that differs from its default',
                 '__biliFavFix.fab.resetPosition()  move the floating button back to its default corner',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',

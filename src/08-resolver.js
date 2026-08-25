@@ -122,7 +122,7 @@
         // deliberately left alone for suppressed avs (nothing was queried, so
         // claiming "已查询但无记录" would be a lie), and the walk's termination
         // test must read activeTodo too: with todoAvs it would never see
-        // allFound for a suppressed av and would run the full MAX_PAGE_WALK.
+        // allFound for a suppressed av and would run the full page-walk cap.
         if (!activeTodo.length && todoAvs.length) {
             log('phase 1 skipped — all', todoAvs.length, 'todo av(s) on the 停止重试 list');
         }
@@ -136,7 +136,7 @@
             // whether or not the response actually contains it. "Got no
             // record" = the av wasn't in the response.
             activeTodo.forEach(function (av) { markAttempted(av, src); });
-            var pn = 1, MAX_PN = MAX_PAGE_WALK;
+            var pn = 1, MAX_PN = cfg('maxPageWalk');
             while (pn <= MAX_PN) {
                 var allFound = activeTodo.every(function (av) { return pageItems.has(src + '|' + av); });
                 if (allFound) break;
@@ -172,7 +172,7 @@
         // timeouts (5s) bound a single chunk; this bounds the total wall
         // time so a single dead archive can't postpone the DOM patch.
         // If we blow the budget, abort the loop and merge with what we have.
-        var PHASE2_BUDGET_MS = 10000;
+        var PHASE2_BUDGET_MS = cfg('phase2BudgetMs');
         var phase2Deadline = Date.now() + PHASE2_BUDGET_MS;
         for (var s = 0; s < srcOrder.length; s++) {
             var src = srcOrder[s];
@@ -356,10 +356,10 @@
     // records an auto stop for whatever it genuinely gave up on — so the same
     // hopeless folder is not re-sampled from scratch on every visit.
     //
-    // Adaptive backoff (FLAP_BACKOFF_MS / FLAP_MAX_DRY in 01-constants.js): the
+    // Adaptive backoff (cfg('flapBackoffMs') / cfg('flapMaxDry')): the
     // `dry` counter drives BOTH cadence and termination. A walk that recovers
     // something resets dry → next walk fires after the short burst gap; a walk
-    // that recovers nothing bumps dry → the gap widens and, at FLAP_MAX_DRY,
+    // that recovers nothing bumps dry → the gap widens and, at maxDry,
     // the loop concludes the leftovers are genuinely filtered and stops. So a
     // still-flapping folder is sampled fast and converges; a truly-deleted set
     // is abandoned after ~7 cheap samples (~4 min) instead of being hammered.
@@ -431,7 +431,14 @@
         // them after one walk without ever obtaining the image — for these the
         // merge has to actually carry a cover.
         var needCover = new Set((coverNeeded || []).map(String));
-        var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
+        // The loop's own parameters are snapshotted ONCE, here. This run can
+        // last the better part of an hour; re-reading them mid-flight would
+        // change the rules under a half-finished sampling campaign (a lowered
+        // maxDry would end it retroactively, on evidence gathered under the
+        // old one). An edit lands on the next armed loop instead.
+        var maxDry   = cfg('flapMaxDry');
+        var backoff  = cfg('flapBackoffMs');
+        var deadline = Date.now() + cfg('flapTimeBudgetMin') * 60000;
         var walk = 0, dry = 0;
         // Consecutive walks whose android requests ALL threw — an expired /
         // invalidated access_key (code -101), risk control (-352), a few
@@ -447,28 +454,28 @@
         // Did any walk ever obtain a sample? Guards the budget-exhausted exit
         // below for the same reason.
         var everSampled = false;
-        // Did the loop reach a CONCLUSION (dry ran out / the 30-minute budget
-        // did), as opposed to being interrupted? Only a conclusion may write the
+        // Did the loop reach a CONCLUSION (dry ran out / the time budget did),
+        // as opposed to being interrupted? Only a conclusion may write the
         // auto 停止重试 records in the finally. Re-deriving this from `dry` down
         // there would misfire: a folder switch can abort the loop at a moment
-        // when dry happens to sit at FLAP_MAX_DRY, and an interrupted loop is
+        // when dry happens to sit at maxDry, and an interrupted loop is
         // not a verdict on a folder it never finished sampling.
         var gaveUp = false;
         _flapProgress = {
             mediaId: mediaId, startedAt: Date.now(), deadline: deadline,
             total: pending.size, remaining: pending.size,
-            walk: 0, dry: 0, maxDry: FLAP_MAX_DRY,
+            walk: 0, dry: 0, maxDry: maxDry,
             phase: 'walking', page: 0, nextWalkAt: 0, lastRecovered: 0
         };
         try {
             log('flap-bg: start', pending.size, 'candidate(s):',
                 Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
-            while (pending.size && dry < FLAP_MAX_DRY) {
+            while (pending.size && dry < maxDry) {
                 if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
                 // Budget exhausted counts as a conclusion only if android
                 // answered at least once: 30 minutes of failed requests is a
                 // statement about the connection, not about the videos.
-                if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); gaveUp = everSampled; break; }
+                if (Date.now() > deadline)       { log('flap-bg: time budget exhausted'); gaveUp = everSampled; break; }
                 // Drop anything the user stopped WHILE the loop was running:
                 // pressing 停止重试 has to take effect on the next round, not
                 // whenever the loop happens to run out of budget. Only the
@@ -499,7 +506,7 @@
                 //     nothing BY CONSTRUCTION; that is not a result either.
                 var sampledOk = false, interrupted = false;
                 var pn = 1;
-                while (pn <= MAX_PAGE_WALK) {
+                while (pn <= cfg('maxPageWalk')) {
                     if (detectMediaId() !== mediaId) { interrupted = true; break; }
                     if (Date.now() > deadline) break;
                     var allFound = true;
@@ -519,7 +526,7 @@
                 // Leave before an interrupted walk can be read as a verdict. The
                 // top-of-loop guard would break next round anyway — but only
                 // AFTER this round's dry++ had possibly pushed `dry` to
-                // FLAP_MAX_DRY and stamped auto records on every remaining av of
+                // maxDry and stamped auto records on every remaining av of
                 // the folder the user has just left.
                 if (interrupted) { log('flap-bg: folder changed mid-walk, abort'); break; }
                 if (sampledOk) everSampled = true;
@@ -556,23 +563,23 @@
                     // does, but do not count it as one — the candidates were not
                     // sampled, so there is nothing to conclude about them.
                     errRun++;
-                    log('flap-bg walk ' + walk + ': android unreachable (' + errRun + '/' + FLAP_MAX_DRY
+                    log('flap-bg walk ' + walk + ': android unreachable (' + errRun + '/' + maxDry
                         + ' consecutive) — not counted toward dry');
                 } else {
                     errRun = 0;
                     dry++;     // no progress → widen the gap, step toward giving up
-                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
+                    log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + maxDry + ')');
                 }
                 _flapProgress.dry = dry;
                 _flapProgress.lastRecovered = recovered.length;
                 _flapProgress.remaining = pending.size;
 
-                if (!pending.size || dry >= FLAP_MAX_DRY || errRun >= FLAP_MAX_DRY) {
-                    if (dry >= FLAP_MAX_DRY) gaveUp = true;
+                if (!pending.size || dry >= maxDry || errRun >= maxDry) {
+                    if (dry >= maxDry) gaveUp = true;
                     // An error run stops the loop WITHOUT a verdict: the cards
                     // stay 待重试 and a reload — or 立即重试, or the user simply
                     // logging in again — re-arms the loop exactly as before.
-                    else if (errRun >= FLAP_MAX_DRY) log('flap-bg: stopping for now — ' + errRun
+                    else if (errRun >= maxDry) log('flap-bg: stopping for now — ' + errRun
                         + ' consecutive walk(s) could not reach android; no auto 停止重试 written');
                     break;
                 }
@@ -583,7 +590,7 @@
                 // Widen on whichever counter is running: a failing android must
                 // back off just as a fruitless one does, or an outage would be
                 // hammered at the 1s burst gap.
-                var gap = FLAP_BACKOFF_MS[Math.min(Math.max(dry, errRun), FLAP_BACKOFF_MS.length - 1)];
+                var gap = backoff[Math.min(Math.max(dry, errRun), backoff.length - 1)];
                 var until = Date.now() + gap;
                 _flapProgress.phase = 'sleeping';
                 _flapProgress.nextWalkAt = until;

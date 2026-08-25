@@ -2,6 +2,10 @@
 
     function boot() {
         if (!isFavPage()) { log('not a fav page, idle'); return; }
+        // Settings first: every `apply` hook runs here, so a mirrored value
+        // (DEBUG) is correct before the first log line rather than from
+        // whenever someone first opens the settings modal.
+        cfgBoot();
         log('booting on', location.href);
         // Build the 停止重试 index before the first patch pass, so the very
         // first render already knows which cards are switched off. Every
@@ -17,12 +21,12 @@
         // detectMissingAndRender at its END, and patchOnce early-returns
         // when there are no invalid cards. Without this boot-trigger,
         // collections with NO visible invalid cards but with "ghost"
-        // (silently-dropped) items wouldn't show a banner at all. Delay
-        // 1500ms so bilibili's SPA has time to settle the URL and DOM.
+        // (silently-dropped) items wouldn't show a banner at all. The delay
+        // gives bilibili's SPA time to settle the URL and DOM.
         setTimeout(function () {
             var mid = detectMediaId();
             if (mid) detectMissingAndRender(mid);
-        }, 1500);
+        }, cfg('spaSwitchDelayMs'));
     }
 
     if (document.readyState === 'loading') {
@@ -174,6 +178,19 @@
         // session cannot produce a state the UI could not have produced.
         // clearAll() repaints (schedule) instead of reloading — no card's
         // cached snapshot changed, only which badge belongs on it.
+        // The settings registry (01a-settings.js). get/set/reset go through
+        // the SAME cfgSet path the modal uses, so a console session cannot
+        // store a value the modal would have refused. set() returns the
+        // {ok, value} | {ok:false, error} result rather than throwing.
+        settings: {
+            open:    openSettings,
+            get:     cfg,
+            set:     cfgSet,
+            reset:   cfgReset,
+            resetAll: cfgResetAll,
+            changed: cfgChanged,
+            schema:  function () { return SETTINGS_SCHEMA.slice(); }
+        },
         fab: {
             resetPosition: fabResetPosition,
             open:  function () { fabOpen();  return 'fab menu opened'; },
@@ -230,6 +247,9 @@
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
                 '__biliFavFix.backup.importFile(f) merge an exported .zip (File/Blob) back into the store',
                 '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
+                '__biliFavFix.settings.open()      open the settings panel',
+                '__biliFavFix.settings.get(key)    read one setting; .set(key, v) / .reset(key) write it',
+                '__biliFavFix.settings.changed()   every setting that differs from its default',
                 '__biliFavFix.fab.resetPosition()  move the floating button back to its default corner',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',

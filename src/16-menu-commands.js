@@ -117,6 +117,12 @@
         importPickBackupFile();
     }
 
+    function cmdSettings() {
+        // Synchronous and self-contained: the modal owns its own lifecycle
+        // and re-focuses instead of stacking when it is already open.
+        openSettings();
+    }
+
     function cmdAuthStatus() {
         var a = getAuth();
         var age = a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null;
@@ -139,6 +145,7 @@
         GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', cmdBackupFolder);
         GM_registerMenuCommand('fav-fix：管理备份', cmdManageBackup);
         GM_registerMenuCommand('fav-fix：导入备份文件', cmdImportBackup);
+        GM_registerMenuCommand('fav-fix：设置', cmdSettings);
         GM_registerMenuCommand('fav-fix：查看登录状态', cmdAuthStatus);
     } catch (e) { warn('menu register failed', e); }
 
