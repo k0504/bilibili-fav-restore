@@ -147,12 +147,10 @@
             '  padding:3px 7px; border-radius:10px;',
             '  font:600 11px/1 -apple-system,Segoe UI,sans-serif;',
             '  color:#fff; background:rgba(192,57,43,.82);',
-            // The badge is a BUTTON now, so it has to receive the pointer —
-            // but only the root: children with their own hit area would let a
-            // click land on a node whose handler we never bound.
-            '  pointer-events:auto; cursor:pointer; user-select:none;',
+            // Status only, never a click target. The action lives in the
+            // centred button below, where the user can actually see it.
+            '  pointer-events:none; user-select:none;',
             '}',
-            '.fav-fix-retry-badge > * { pointer-events:none; }',
             '.fav-fix-retry-badge .fav-fix-retry-dot {',
             '  width:9px; height:9px; border-radius:50%;',
             '  border:2px solid rgba(255,255,255,.4); border-top-color:#fff;',
@@ -163,51 +161,78 @@
             '  animation:__fav_fix_retry_pulse 1.8s ease-in-out infinite;',
             '}',
             '.fav-fix-retry-badge.waiting .fav-fix-retry-dot { animation:none; border-top-color:rgba(255,255,255,.55); }',
-            // Stopped: no animation anywhere and no spinner dot — the card must
+            // Stopped: no animation anywhere and no spinner dot. The card must
             // read as "nothing is happening here", which is the whole point.
             '.fav-fix-retry-badge.stopped {',
             '  background:rgba(60,64,67,.88);',
             '  animation:none;',
             '}',
             '.fav-fix-retry-badge.stopped .fav-fix-retry-dot { display:none; }',
-            // Label swap on hover, CSS-only (see the block comment above).
-            '.fav-fix-retry-badge .fav-fix-retry-hover { display:none; }',
-            '.fav-fix-retry-badge:hover .fav-fix-retry-idle { display:none; }',
-            '.fav-fix-retry-badge:hover .fav-fix-retry-hover { display:inline; }'
+            // THE action control: a real button, centred on the cover, visible
+            // at rest. An earlier revision made the corner badge itself
+            // clickable, and a status label reads as a status label no matter
+            // what it does on hover. The affordance has to be its own object,
+            // sitting where the eye already lands.
+            '.fav-fix-retry-action {',
+            '  position:absolute; left:50%; top:50%;',
+            '  transform:translate(-50%,-50%); z-index:2147483646;',
+            '  padding:8px 18px; border-radius:18px; border:1px solid rgba(255,255,255,.18);',
+            '  font:600 12px/1 -apple-system,Segoe UI,"PingFang SC","Microsoft YaHei",sans-serif;',
+            '  color:#fff; background:rgba(28,28,30,.86); white-space:nowrap;',
+            '  cursor:pointer; pointer-events:auto; user-select:none;',
+            '  box-shadow:0 2px 10px rgba(0,0,0,.35);',
+            '  transition:background .15s, box-shadow .15s;',
+            '}',
+            '.fav-fix-retry-action > * { pointer-events:none; }',
+            '.fav-fix-retry-action:hover { background:rgba(192,57,43,.92); box-shadow:0 3px 14px rgba(0,0,0,.45); }',
+            '.fav-fix-retry-action.resume:hover { background:rgba(52,120,190,.92); }'
         ].join('\n');
         (document.head || document.documentElement).appendChild(st);
     }
 
-    // Resting label / hover label per state. The hover label always names the
-    // ACTION the click performs, never the state it is in.
+    // Badge label per state. Status wording only; it is not clickable.
     var RETRY_BADGE_TEXT = {
-        active:  { idle: '重试中',     hover: '停止重试' },
-        waiting: { idle: '待重试',     hover: '停止重试' },
-        stopped: { idle: '已停止重试', hover: '恢复重试' }
+        active:  '重试中',
+        waiting: '待重试',
+        stopped: '已停止重试'
+    };
+    // Button label per state. Names the ACTION, never the state.
+    var RETRY_ACTION_TEXT = {
+        active:  '停止重试',
+        waiting: '停止重试',
+        stopped: '恢复重试'
     };
 
     // Write a state onto an existing badge. Early-returns when the state is
-    // unchanged so the observer's repeated patch passes don't churn text nodes
-    // under the user's cursor. data-fav-fix-retry-state is also the click
-    // handler's source of truth (see bindRetryBadge).
+    // unchanged so the observer's repeated patch passes don't churn text nodes.
     function applyRetryBadgeState(badge, state) {
         if (!RETRY_BADGE_TEXT[state]) state = 'waiting';
         if (badge.getAttribute('data-fav-fix-retry-state') === state) return;
         badge.setAttribute('data-fav-fix-retry-state', state);
         badge.classList.toggle('waiting', state === 'waiting');
         badge.classList.toggle('stopped', state === 'stopped');
-        var idle  = badge.querySelector('[data-fav-fix-retry-txt]');
-        var hover = badge.querySelector('[data-fav-fix-retry-hover]');
-        if (idle)  idle.textContent  = RETRY_BADGE_TEXT[state].idle;
-        if (hover) hover.textContent = RETRY_BADGE_TEXT[state].hover;
+        var t = badge.querySelector('[data-fav-fix-retry-txt]');
+        if (t) t.textContent = RETRY_BADGE_TEXT[state];
     }
 
-    // The two user-facing transitions, defined once so the cover badge, the
+    // Same for the action button. data-fav-fix-retry-state on the BUTTON is the
+    // click handler's source of truth, so it is stamped here rather than read
+    // off the badge: the two nodes are updated in the same pass, but the
+    // handler must not depend on that ordering.
+    function applyRetryActionState(btn, state) {
+        if (!RETRY_ACTION_TEXT[state]) state = 'waiting';
+        btn.classList.toggle('resume', state === 'stopped');
+        if (btn.getAttribute('data-fav-fix-retry-state') === state) return;
+        btn.setAttribute('data-fav-fix-retry-state', state);
+        btn.textContent = RETRY_ACTION_TEXT[state];
+    }
+
+    // The two user-facing transitions, defined once so the cover button, the
     // card menu (11-menu.js) and the debug surface (17-boot.js) cannot drift.
     function stopRetryForAv(av) {
         setNoRetryUser(av);
         toast('已停止重试，可再次点击恢复', 'ok');
-        // Repaint so any other card of the same av (and the badge, when the
+        // Repaint so any other card of the same av (and the control, when the
         // caller did not update it in place) reflects the new state.
         schedule();
     }
@@ -221,45 +246,45 @@
         patchOnce().catch(function (e) { warn('resume-retry patchOnce threw:', e); });
     }
 
-    // Bind the badge's click ONCE per element. Idempotent via __favFixBadgeBound
-    // because markPending re-runs on every observer tick for the same node.
-    function bindRetryBadge(badge) {
-        if (badge.__favFixBadgeBound) return;
-        badge.__favFixBadgeBound = true;
-        // The badge sits inside the card, and the card is an <a>. stopPropagation
-        // keeps the event away from the card's own handlers and from bilibili's
-        // document-level delegates, but it does NOT stop the anchor's default
-        // navigation — that needs preventDefault. Both are applied to mousedown
-        // as well as click: bilibili has document-level listeners that rewrite
-        // anchor behaviour (AGENTS.md gotcha 20, last bullet — an <a> appended to
-        // the document had its blob: href hijacked and navigated the whole tab),
-        // and some of that machinery acts before a click event ever exists.
+    // Bind the button's click ONCE per element. Idempotent via
+    // __favFixActionBound because markPending re-runs on every observer tick
+    // for the same node.
+    function bindRetryAction(btn) {
+        if (btn.__favFixActionBound) return;
+        btn.__favFixActionBound = true;
+        // The button sits inside the card, and the card is an <a>.
+        // stopPropagation keeps the event away from the card's own handlers and
+        // from bilibili's document-level delegates, but it does NOT stop the
+        // anchor's default navigation, which needs preventDefault. Both are
+        // applied to mousedown as well as click: bilibili has document-level
+        // listeners that rewrite anchor behaviour (AGENTS.md gotcha 20, last
+        // bullet: an <a> appended to the document had its blob: href hijacked
+        // and navigated the whole tab), and some of that machinery acts before
+        // a click event ever exists.
         var swallow = function (e) { e.preventDefault(); e.stopPropagation(); };
-        badge.addEventListener('mousedown', swallow);
-        badge.addEventListener('click', function (e) {
+        btn.addEventListener('mousedown', swallow);
+        btn.addEventListener('click', function (e) {
             swallow(e);
             // Read av + state from the DOM at click time, never from a closure:
             // this node is reused by later render passes (and by bilibili's
             // virtualized scroll), so a captured value goes stale the moment the
-            // card's state — or the card itself — changes.
-            var av = badge.getAttribute('data-fav-fix-retry-av');
+            // card's state, or the card itself, changes.
+            var av = btn.getAttribute('data-fav-fix-retry-av');
             if (!av) return;
-            if (badge.getAttribute('data-fav-fix-retry-state') === 'stopped') {
-                // Flip out of 'stopped' HERE, for the same reason the stop
-                // direction flips in place below — only more so: nothing
-                // repaints this card until applyPatch runs after the whole
-                // resolve (phase 2 alone is budgeted at 10s), and the loading
-                // overlay sits BELOW the badge, so a badge still reading
-                // 已停止重试 stays visible and clickable throughout. A second
-                // click would re-enter resumeRetryForAv: another cache drop,
-                // another toast, and a _patchDirty second full resolve pass.
-                applyRetryBadgeState(badge, _flapBgRunning ? 'active' : 'waiting');
+            if (btn.getAttribute('data-fav-fix-retry-state') === 'stopped') {
+                // Flip out of 'stopped' HERE: nothing repaints this card until
+                // applyPatch runs after the whole resolve (phase 2 alone is
+                // budgeted at 10s), and a button still reading the resume label
+                // stays clickable throughout. A second click would re-enter
+                // resumeRetryForAv: another cache drop, another toast, and a
+                // _patchDirty second full resolve pass.
+                applyRetryActionState(btn, _flapBgRunning ? 'active' : 'waiting');
                 resumeRetryForAv(av);
             } else {
-                // Flip the badge in place rather than waiting for the next
-                // render pass: the flap loop may be mid-backoff and nothing else
-                // would touch this card for up to two minutes.
-                applyRetryBadgeState(badge, 'stopped');
+                // Flip in place rather than waiting for the next render pass:
+                // the flap loop may be mid-backoff and nothing else would touch
+                // this card for up to two minutes.
+                applyRetryActionState(btn, 'stopped');
                 stopRetryForAv(av);
             }
         });
@@ -281,21 +306,29 @@
             var dot = document.createElement('span');
             dot.className = 'fav-fix-retry-dot';
             var txt = document.createElement('span');
-            txt.className = 'fav-fix-retry-idle';
             txt.setAttribute('data-fav-fix-retry-txt', '1');
-            var hov = document.createElement('span');
-            hov.className = 'fav-fix-retry-hover';
-            hov.setAttribute('data-fav-fix-retry-hover', '1');
             badge.appendChild(dot);
             badge.appendChild(txt);
-            badge.appendChild(hov);
             coverWrap.appendChild(badge);
         }
-        // Re-stamped every pass: the same badge node can end up serving a
-        // different card after a virtualized re-render.
-        badge.setAttribute('data-fav-fix-retry-av', av == null ? '' : String(av));
         applyRetryBadgeState(badge, state);
-        bindRetryBadge(badge);
+
+        // The control itself, centred on the cover. Created alongside the badge
+        // and torn down with it (clearPending removes both).
+        var btn = coverWrap.querySelector('[data-fav-fix-retry-action]');
+        if (!btn) {
+            btn = document.createElement('div');
+            btn.setAttribute('data-fav-fix-retry-action', '1');
+            btn.setAttribute('role', 'button');
+            btn.setAttribute('tabindex', '0');
+            btn.className = 'fav-fix-retry-action';
+            coverWrap.appendChild(btn);
+        }
+        // Re-stamped every pass: the same nodes can end up serving a different
+        // card after a virtualized re-render.
+        btn.setAttribute('data-fav-fix-retry-av', av == null ? '' : String(av));
+        applyRetryActionState(btn, state);
+        bindRetryAction(btn);
     }
 
     function clearPending(hit) {
@@ -304,7 +337,8 @@
         if (hit.img && hit.img.parentElement) scopes.push(hit.img.parentElement);
         if (hit.container) scopes.push(hit.container);
         for (var s = 0; s < scopes.length; s++) {
-            var b = scopes[s].querySelectorAll('[data-fav-fix-retry]');
+            // Both nodes: the corner status badge and the centred action button.
+            var b = scopes[s].querySelectorAll('[data-fav-fix-retry], [data-fav-fix-retry-action]');
             for (var i = 0; i < b.length; i++) b[i].remove();
         }
     }
