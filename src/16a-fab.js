@@ -65,7 +65,8 @@
         ] },
         { id: 'backup', label: '备份', items: [
             { label: '备份当前收藏夹',        run: cmdBackupFolder },
-            { label: '管理备份',              run: cmdManageBackup }
+            { label: '管理备份',              run: cmdManageBackup },
+            { label: '导入备份文件',          run: cmdImportBackup }
         ] },
         { id: 'maint', label: '维护与调试', items: [
             { label: '开关调试日志',          run: cmdToggleDebug, hint: fabDebugHint },

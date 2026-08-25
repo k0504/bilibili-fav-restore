@@ -362,6 +362,11 @@
     // __biliFavFix.backup.run().
     async function backupCurrentFolder() {
         if (_backupRunning) { toast('备份正在进行中', 'warn'); return null; }
+        // _importRunning lives in 15d-backup-import.js; var hoisting across the
+        // concatenated IIFE makes it visible here. An import rewrites the very
+        // records this walk reads and carries forward, so the two must not
+        // overlap — the same exclusion the export already declares.
+        if (_importRunning) { toast('导入进行中，请稍后备份', 'warn'); return null; }
         if (typeof indexedDB === 'undefined') {
             toast('当前环境不支持 IndexedDB，无法备份', 'err');
             return null;

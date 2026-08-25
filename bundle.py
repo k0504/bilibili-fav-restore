@@ -62,6 +62,7 @@ MANIFEST = [
     '15a-backup.js',        # IndexedDB backup store + walker + SOURCES.backup
     '15b-backup-manage.js', # in-page backup manager panel (browse + delete)
     '15c-backup-export.js', # CRC-32 + STORE zip writer + exportBackupRows
+    '15d-backup-import.js', # zip reader + importBackupFile (merge back into IDB)
     '16-menu-commands.js',  # command implementations + GM_registerMenuCommand wiring
     '16a-fab.js',           # draggable floating action button + two-level menu
     '17-boot.js',           # boot + __biliFavFix debug surface + IIFE close

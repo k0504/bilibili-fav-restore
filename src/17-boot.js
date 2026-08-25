@@ -150,10 +150,17 @@
         // it, verify the CRCs, count the entries) with no UI in the loop. The
         // scope sort is 'none' because a cursor walk has no view ordering to
         // record — the panel supplies its own dropdown value instead.
+        //
+        // importFile(fileOrBlob) is the other direction (15d-backup-import.js)
+        // WITHOUT the file picker: hand it a File from an <input> or a Blob
+        // built in the console and it merges the container straight into the
+        // store, so an export/import round trip can be driven end to end from
+        // DevTools. It resolves to the same stats object the toast summarises.
         backup: {
             run: backupCurrentFolder,
             status: backupStatus,
             manage: openBackupManager,
+            importFile: importBackupFile,
             exportAll: function () {
                 return buildBackupIndex().then(function (rows) {
                     return exportBackupRows(rows, {
@@ -221,6 +228,7 @@
                 '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
                 '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
+                '__biliFavFix.backup.importFile(f) merge an exported .zip (File/Blob) back into the store',
                 '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
                 '__biliFavFix.fab.resetPosition()  move the floating button back to its default corner',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',

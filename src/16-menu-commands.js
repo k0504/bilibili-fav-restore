@@ -109,6 +109,14 @@
         });
     }
 
+    function cmdImportBackup() {
+        // Nothing to swallow here: the picker helper (15d-backup-import.js)
+        // owns the whole lifecycle — it opens the dialog, reports refusals as
+        // toasts and catches a throwing run itself. A dismissed dialog is
+        // silent by design.
+        importPickBackupFile();
+    }
+
     function cmdAuthStatus() {
         var a = getAuth();
         var age = a.ts ? Math.floor((Date.now() - a.ts) / 86400000) : null;
@@ -130,6 +138,7 @@
         GM_registerMenuCommand('fav-fix：清除所有「停止重试」标记', cmdClearAllNoRetry);
         GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', cmdBackupFolder);
         GM_registerMenuCommand('fav-fix：管理备份', cmdManageBackup);
+        GM_registerMenuCommand('fav-fix：导入备份文件', cmdImportBackup);
         GM_registerMenuCommand('fav-fix：查看登录状态', cmdAuthStatus);
     } catch (e) { warn('menu register failed', e); }
 

@@ -288,7 +288,15 @@
                 title:                (m && m.title) || null,
                 last_run:             (m && m.last_run) || null,
                 total_seen:           (m && m.total_seen) || 0,
-                last_attempt_partial: !!(m && m.last_attempt_partial)
+                last_attempt_partial: !!(m && m.last_attempt_partial),
+                // An ADDED field, and format_version deliberately stays 1: a
+                // reader ignores keys it does not know, so an older script
+                // reads this manifest exactly as it read every previous one,
+                // while a current one recovers the page an aborted walk
+                // stopped at instead of rendering an imported folder as 第 0
+                // 页. Only a field whose ABSENCE a reader cannot survive would
+                // justify the bump, and this is not one.
+                last_attempt_page:    (m && m.last_attempt_page) || 0
             });
         }
         return out;
@@ -376,6 +384,11 @@
         // began — is left alone as a known benign race; guarding it would mean
         // a global lock for no practical gain.
         if (_backupRunning) { toast('备份进行中，请稍后导出', 'warn'); return null; }
+        // Same argument for the merge direction: an import rewrites records
+        // this walk is in the middle of reading. The flag lives in
+        // 15d-backup-import.js and is visible here through var hoisting across
+        // the concatenated IIFE.
+        if (_importRunning) { toast('导入进行中，请稍后导出', 'warn'); return null; }
 
         // Pre-flight, before a single record is read: with no ZIP64 records an
         // over-cap archive is not a write error but a file that silently fails
