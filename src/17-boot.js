@@ -8,6 +8,9 @@
         // accessor re-checks the guard anyway, so this is an optimization of
         // ordering, not a correctness dependency.
         loadNoRetryIndex();
+        // The in-page command surface. Installed before the first patch
+        // pass so the button is reachable even if a scan stalls.
+        try { installFab(); } catch (e) { warn('fab install failed', e); }
         startObserver();
         schedule();
         // Independent missing-items check from boot — patchOnce only runs
@@ -164,6 +167,11 @@
         // session cannot produce a state the UI could not have produced.
         // clearAll() repaints (schedule) instead of reloading — no card's
         // cached snapshot changed, only which badge belongs on it.
+        fab: {
+            resetPosition: fabResetPosition,
+            open:  function () { fabOpen();  return 'fab menu opened'; },
+            close: function () { fabClose(); return 'fab menu closed'; }
+        },
         noRetry: {
             list: noRetryList,
             counts: noRetryCounts,
@@ -214,6 +222,7 @@
                 '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
                 '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
+                '__biliFavFix.fab.resetPosition()  move the floating button back to its default corner',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',
                 '__biliFavFix.bvToAv(bv) / avToBv(av)'
