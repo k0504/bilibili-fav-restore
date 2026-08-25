@@ -11,7 +11,7 @@
     //   - changing the merged-item shape (renaming fields etc.)
 
     var CACHE_PREFIX  = 'item:av';
-    var CACHE_VERSION = 6;   // bumped: +SOURCES.backup (IndexedDB snapshots lead FIELD_PRIORITY)
+    var CACHE_VERSION = 7;   // bumped: SOURCES.backup now offers a cover only when it holds the bytes (byteless records fall to _cover_pending instead of winning the cover slot with a dead url)
     // → cfg('cacheTtlDays'), default 30.
     // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
     // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly

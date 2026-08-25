@@ -561,12 +561,24 @@
                 // Deliberately NOT returned: `attr` and `link`. Those describe
                 // the item's CURRENT state / navigation target, which the live
                 // sources own; a stale backed-up `attr` would tell the UI a
-                // dead video is still valid.
+                // dead video is still valid. `cover` (below) is withheld too
+                // whenever we do not actually hold its bytes.
                 out.set(av, {
                     oid:      Number(av),
                     bvid:     rec.bvid || undefined,
                     title:    rec.title,
-                    cover:    rec.cover_url || undefined,
+                    // Offer a cover ONLY when we hold its bytes. A stored
+                    // cover_url with no cover_blob (an url-only import via
+                    // importUrlOnlyQuad in 15d, or a blob_failed walk in
+                    // commitBackupRecord) is a real bilibili URL that passes
+                    // QUALITY.cover and would win FIELD_PRIORITY.cover (backup
+                    // leads), blocking android/public/biliplus/jijidown — and if
+                    // the URL is dead the card shows a broken image with no blob
+                    // to fall back to. Gating on cover_blob keeps the invariant:
+                    // fetchAvs advertises a cover IFF backupCoverObjectUrl
+                    // (09-dom.js) can serve its bytes. The url still lives in the
+                    // stored record for the self-healing re-download path.
+                    cover:    rec.cover_blob ? (rec.cover_url || undefined) : undefined,
                     intro:    rec.intro || undefined,
                     duration: rec.duration,
                     upper:    rec.upper || undefined,
