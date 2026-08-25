@@ -499,8 +499,11 @@
 
                 // One fresh android walk straight into pageItems.
                 //   sampledOk — this walk actually holds android's answer about
-                //     the candidates: a page came back, or every candidate
-                //     already has a row so there was nothing left to ask for.
+                //     the candidates: a page came back, or the allFound early
+                //     exit fired because every candidate already has a USABLE
+                //     answer — for a cover-needed av that means a row whose
+                //     cover passes QUALITY, not mere row presence (a stale
+                //     coverless row is not an answer to "where is the cover").
                 //     A walk whose every request threw has neither.
                 //   interrupted — a folder switch truncated the walk. The
                 //     observer's dropAllInMemory() has cleared pageItems out
@@ -511,8 +514,23 @@
                 while (pn <= cfg('maxPageWalk')) {
                     if (detectMediaId() !== mediaId) { interrupted = true; break; }
                     if (Date.now() > deadline) break;
+                    // Quality-aware, not presence-only: a cover-needed av
+                    // (the coverNeeded set, incl. mid-run title-only migrants)
+                    // always HAS a stale android row — that row is HOW it got
+                    // its title. A presence test would break here at pn=1 on
+                    // every later walk, so the promotion pass would re-merge
+                    // the same stale rows, no fresh page would ever be
+                    // fetched, and dry would climb to maxDry over ~7
+                    // no-network walks — the cover chase structurally a no-op.
+                    // Counting those avs as satisfied only once their row
+                    // carries a usable cover keeps the walk fetching fresh
+                    // samples, which is the entire point of this loop.
                     var allFound = true;
-                    pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
+                    pending.forEach(function (av) {
+                        var row = pageItems.get('android|' + av);
+                        if (!row) { allFound = false; return; }
+                        if (needCover.has(av) && QUALITY.cover(row.cover) < 5) allFound = false;
+                    });
                     if (allFound) { sampledOk = true; break; }
                     _flapProgress.page = pn;
                     var page;
