@@ -50,9 +50,16 @@
     var _promoteCancelled = new Set();
 
     // Task-kind precedence for the queued-task upgrade in enqueuePromotion:
-    // a FULL promotion supersedes a queued META for the same av (the reverse
-    // never downgrades). Ranks, not equality, so future kinds slot in.
-    var PROMOTE_KIND_RANK = { full: 3, meta: 2 };
+    // a FULL promotion supersedes a queued META, and either supersedes a
+    // queued folder-accrual (the reverse never downgrades — a FULL/META
+    // write already unions the folder, so nothing is lost in the upgrade).
+    var PROMOTE_KIND_RANK = { full: 3, meta: 2, accrue: 1 };
+
+    // Folder-accrual memo, keyed `mediaId|av`, session-scoped. A cache-hit
+    // resolve (or a backup-served merge that cheap-skips promotion) fires on
+    // every folder visit; without the memo each debounced tick would re-queue
+    // the same no-op accrual.
+    var _accrued = new Set();
 
     var PROMOTE_MIGRATED_FLAG = 'promote:migrated:v7';
 
@@ -89,8 +96,35 @@
         if (!cfg('autoPromoteRestored')) return;
         if (typeof indexedDB === 'undefined') return;
         var kind = promoteClassify(rec, false);
-        if (!kind) return;
+        if (!kind) {
+            // Not promotable — most commonly a merge served entirely from the
+            // backup store (the cheap-skips above). The record's FOLDER
+            // MEMBERSHIP must still accrete, or an av backed up in folder A
+            // and later viewed in folder B would never gain B in media_ids
+            // (panel filter and export grouping would omit it there). Only on
+            // this null path, so an accrual can never displace a FULL/META.
+            maybeAccrueFolder(av, mediaId);
+            return;
+        }
         enqueuePromotion({ av: String(av), merged: rec, mediaId: mediaId, kind: kind, mig: false });
+    }
+
+    // Enqueue a media_ids-only union of the current folder into an EXISTING
+    // record. Routed through the same queue as the real promotions so the
+    // bulk-op deferral, the per-av cancel and the quiesce wait all apply to
+    // it. Hooked from the maybePromoteRecovered null path (above) and from
+    // patchOnceInner's cache-hit fast path (14-orchestrate.js) — the two
+    // paths a confident av takes on every visit AFTER the one that promoted
+    // it. Deliberately NOT hooked from restoreLocalOnly: the credential-less
+    // path stays write-free.
+    function maybeAccrueFolder(av, mediaId) {
+        if (mediaId == null) return;
+        if (!cfg('autoPromoteRestored')) return;
+        if (typeof indexedDB === 'undefined') return;
+        var key = String(mediaId) + '|' + String(av);
+        if (_accrued.has(key)) return;
+        _accrued.add(key);
+        enqueuePromotion({ av: String(av), merged: null, mediaId: mediaId, kind: 'accrue', mig: false });
     }
 
     function enqueuePromotion(task) {
@@ -202,6 +236,21 @@
             warn('promote: idbGet failed for av', av, '— skipped:', e && e.message);
             return;
         }
+        if (task.kind === 'accrue') {
+            // Folder-membership bookkeeping ONLY: union the folder into an
+            // existing record's media_ids and put it back. backed_at and
+            // data_source are deliberately untouched — an accrual is
+            // bookkeeping, not an observation, and stamping it would tell
+            // the next backup run the record is fresher than it is.
+            if (!existing) return;
+            if (existing.media_ids && existing.media_ids.indexOf(Number(task.mediaId)) >= 0) return;
+            existing.media_ids = backupUnionMediaIds(existing, task.mediaId);
+            // Same delete-wins rule as the real promotions.
+            if (_promoteCancelled.has(av)) return;
+            try { await idbPut(BACKUP_STORE_ITEMS, existing); }
+            catch (e2) { warn('promote: accrue idbPut failed for av', av, e2 && e2.message); }
+            return;
+        }
         // META write rule: never downgrade a byte-bearing record to a
         // coverless marker. (In normal flow this cannot even classify META —
         // a byte-backed record makes phase 0 serve the cover — so this guard
@@ -225,8 +274,10 @@
         var wrote = await commitBackupRecord(built, st);
         if (wrote) {
             // Same invalidation the walker and the importer do: the store just
-            // turned "no local data for this av" into "there is now".
+            // turned "no local data for this av" into "there is now" — and the
+            // logged-out hit memo may hold a merge this write supersedes.
             _localOnlyMiss.clear();
+            _localOnlyHits.clear();
             log('promote:', task.kind, 'av', av, existing ? '(updated)' : '(new)');
         }
         if (task.mig && _migStats) {

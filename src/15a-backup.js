@@ -362,6 +362,19 @@
                 task.rec.cover_type = blob.type || null;
                 task.rec.cover_size = blob.size || 0;
             } catch (e) {
+                warn('backup: cover fetch failed for av', task.rec.av, e && e.message);
+                if (task.requireBytes && !task.keptBlob) {
+                    // Bytes-required provenance ('merged' / 'restored'): a
+                    // record whose cover fetch failed is not stored. Writing
+                    // it anyway would manufacture exactly the url-without-
+                    // bytes shape the SOURCES.backup supply-side gate exists
+                    // to neutralize. Counted ONLY in merged_nocover — not
+                    // also blob_failed — so the toast's 封面失败 and
+                    // 还原封面下载失败未收录 lines are disjoint sets rather
+                    // than the latter double-surfacing a subset of the former.
+                    stats.merged_nocover++;
+                    return false;
+                }
                 // Leave the carried-forward fields alone. Deleting the only
                 // copy of an already-archived cover because today's download
                 // failed is unrecoverable; the record keeps the OLD url+bytes,
@@ -370,17 +383,6 @@
                 // stays null and the URL is retried on the next run.
                 stats.blob_failed++;
                 if (task.keptBlob) stats.cover_kept++;
-                warn('backup: cover fetch failed for av', task.rec.av, e && e.message);
-                if (task.requireBytes && !task.keptBlob) {
-                    // Bytes-required provenance ('merged' / 'restored'): a
-                    // record whose cover fetch failed is not stored. Writing
-                    // it anyway would manufacture exactly the url-without-
-                    // bytes shape the SOURCES.backup supply-side gate exists
-                    // to neutralize. Surfaced via its own counter — this is
-                    // data the user may want to know went uncaptured.
-                    stats.merged_nocover++;
-                    return false;
-                }
             }
         } else if (task.requireBytes && !task.keptBlob) {
             // Defensive: a bytes-required task with neither carried bytes nor
@@ -503,9 +505,10 @@
             _backupRunning = false;
             // A run just turned "no local data for this av" into "there is
             // now", so the credential-less restore path must re-check
-            // (14-orchestrate.js); nothing else invalidates that memo without
-            // a page load.
+            // (14-orchestrate.js) — and its hit memo may hold merges this
+            // walk's fresher records supersede.
             _localOnlyMiss.clear();
+            _localOnlyHits.clear();
             await writeBackupMeta(mediaId, stats, aborted, pn, folderTitle);
             // Promotion tasks defer while this walk holds the store (15e);
             // resume them now instead of waiting for the next recovery to

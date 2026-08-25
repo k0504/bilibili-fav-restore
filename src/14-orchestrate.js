@@ -145,6 +145,16 @@
     // does a backup run, which is the one thing that can turn a miss into a hit
     // without a page load.
     var _localOnlyMiss = new Set();
+    // …and the HIT twin: av → the backup-served merge applyPatch accepted.
+    // Needed because this path never saveCache()s (red line) while partial
+    // cards deliberately stay re-detectable (markPartial omits
+    // data-fav-fix-marked) — so a logged-out folder full of title-only backup
+    // records would otherwise re-open an IDB transaction per card on EVERY
+    // observer tick, the exact thrash _localOnlyMiss exists to prevent, just
+    // through the hit door. Cleared wherever _localOnlyMiss is cleared (folder
+    // switch, backup run, import, promotion write). Login makes it moot:
+    // patchOnceInner then takes the resolver path, never this one.
+    var _localOnlyHits = new Map();
 
     // Runs INSTEAD of the resolver when there is no access_key. It must not
     // touch the network (android owns every invalid-item snapshot and is
@@ -163,7 +173,7 @@
         hits.forEach(function (hit) {
             var av = getAvFromHit(hit);
             if (!av || _localOnlyMiss.has(av)) return;
-            var c = loadCache(av);
+            var c = loadCache(av) || _localOnlyHits.get(av);
             if (c) {
                 try {
                     var r = applyPatch(hit, c);
@@ -201,6 +211,10 @@
                         var r = applyPatch(t.hit, real);
                         if (r === 'patched') patched++;
                         else if (r === 'partial') partial++;
+                        // Memoise the accepted merge so the next tick serves
+                        // it from memory instead of re-opening an IDB
+                        // transaction (see _localOnlyHits above).
+                        if (r === 'patched' || r === 'partial') _localOnlyHits.set(t.av, real);
                     } catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
                 });
             }
@@ -288,6 +302,12 @@
                 if (r === 'patched') patched++;
                 else if (r === 'partial') partial++;
                 else if (r === 'unrecoverable') unrecoverable++;
+                // Folder accretion (15e): a cache-hit av never reaches the
+                // resolver's promotion hooks, so without this its backup
+                // record would keep only the folder it was first promoted in
+                // for the whole cache TTL (panel filter / export grouping
+                // would omit it elsewhere). Memoised + no-op'd internally.
+                if (r === 'patched' || r === 'partial') maybeAccrueFolder(p.av, mediaId);
             } catch (e) {
                 warn('fast-path applyPatch threw for av', p.av, e);
             }

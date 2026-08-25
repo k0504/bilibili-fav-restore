@@ -40,10 +40,12 @@
         _flapLeftover.clear();
         _flapLeftoverCover.clear();
         _flapLeftoverMid = null;
-        // Same reasoning for the credential-less restore path's negative memo
-        // (14-orchestrate.js): it records "no local data for this av", which is
-        // only meaningful for the folder currently on screen.
+        // Same reasoning for the credential-less restore path's two memos
+        // (14-orchestrate.js): the negative one records "no local data for
+        // this av", the positive one caches the served merge — both are only
+        // meaningful for the folder currently on screen.
         _localOnlyMiss.clear();
+        _localOnlyHits.clear();
     }
 
     async function fetchAllAvList(mediaId) {

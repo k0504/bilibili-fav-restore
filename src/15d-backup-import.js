@@ -646,8 +646,10 @@
             // The store just turned "no local data for this av" into "there is
             // now", so the credential-less restore path must re-check
             // (14-orchestrate.js) — the same invalidation a backup run does in
-            // its finally. Nothing else clears that memo without a page load.
+            // its finally, hit memo included (it may hold merges the imported
+            // records supersede).
             _localOnlyMiss.clear();
+            _localOnlyHits.clear();
         }
 
         // Appended only when non-zero, and the whole toast drops to warn: each

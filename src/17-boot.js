@@ -85,7 +85,11 @@
             // markPatched sets data-fav-fix-marked (NOT data-fav-fix-patched).
             // patchCover sets data-fav-fix-original on the <img>. Count both
             // so a partial patch (cover only / mark only) is visible.
-            var cardsMarked = document.querySelectorAll('[data-fav-fix-marked]').length;
+            // :not(img) = containers only: the markers stamp BOTH the img and
+            // its ancestor container, so a document-wide count doubled every
+            // img-bearing card. Strategy-2 no-img cards still count — their
+            // container carries the attribute.
+            var cardsMarked = document.querySelectorAll('[data-fav-fix-marked]:not(img)').length;
             var coversPatched = document.querySelectorAll('img[data-fav-fix-original]').length;
             // cardsLoading: in-flight cards still showing the orange "处理中"
             // badge. Should drop to 0 once patchOnce settles; if it stays >0
@@ -95,7 +99,8 @@
             // amber outline). These cards deliberately carry NO
             // data-fav-fix-marked so Strategy 1 keeps re-detecting them —
             // which means invalidDetectedNow legitimately includes them.
-            var cardsPartial = document.querySelectorAll('[data-fav-fix-partial]').length;
+            // :not(img) for the same containers-only reason as cardsMarked.
+            var cardsPartial = document.querySelectorAll('[data-fav-fix-partial]:not(img)').length;
             return {
                 version: CORE_VERSION,
                 authMode: getAuth().mode,
