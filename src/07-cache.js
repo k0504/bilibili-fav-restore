@@ -50,6 +50,19 @@
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
+    // loadCache without the staleness test. The entry is past its TTL, but it
+    // is still the best thing this script knows about the av — and for an av on
+    // the 停止重试 list that is the whole story, because no network work will be
+    // scheduled to learn anything better. The resolver uses it there instead of
+    // overwriting a title-bearing merge with a bare _pending stub (08-resolver.js
+    // merge block). Deliberately does NOT refresh _cached_at: the entry has to
+    // stay stale so the first resolve after the suppression lapses re-fetches.
+    function loadCacheStale(av) {
+        var v = GM_getValue(CACHE_PREFIX + av, null);
+        if (!v) return null;
+        if (v._cache_version !== CACHE_VERSION) return null;
+        return v;
+    }
     function saveCache(av, merged) {
         merged._cache_version = CACHE_VERSION;
         merged._cached_at = Date.now();

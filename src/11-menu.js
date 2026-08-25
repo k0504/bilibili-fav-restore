@@ -70,12 +70,39 @@
         // current.)
         if (av) { var _lc = loadCache(av); if (_lc) real = _lc; }
         var bv = real.bvid || (av ? avToBv(av) : null);
+        // Same live-read reasoning as the loadCache line above, for the same
+        // reason: the user may have stopped or resumed this av since the
+        // dropdown was bound, and the closure would show the stale action.
+        var stopped = av ? isNoRetryUser(av) : false;
         var items = [];
-        // Primary action for a still-pending card: re-arm THE flap loop now
-        // instead of waiting for the next page reload. Only shown while _pending.
-        if (av && real._pending) items.push({
-            key: 'retry', label: '立即重试',
-            onClick: function () { kickManualRetry(av); }
+        // Retry controls, mutually exclusive by card state (the existing
+        // 立即重试 / 清缓存并重抓 split, now with the stop switch folded in):
+        //   stopped                       → 恢复重试 only. Offering 立即重试 next
+        //                                   to it would be two buttons for one
+        //                                   decision the user already made.
+        //   _pending                      → 立即重试 (re-arm now) + 停止重试.
+        //   _cover_pending                → 停止重试 only. Those cards are
+        //                                   already patched and carry NO badge
+        //                                   (the cover is being chased quietly
+        //                                   in the background), so the menu is
+        //                                   the single entry point for them.
+        if (av && stopped) items.push({
+            key: 'retry', label: '恢复重试',
+            onClick: function () { resumeRetryForAv(av); }
+        });
+        else if (av && real._pending) {
+            items.push({
+                key: 'retry', label: '立即重试',
+                onClick: function () { kickManualRetry(av); }
+            });
+            items.push({
+                key: 'stop-retry', label: '停止重试',
+                onClick: function () { stopRetryForAv(av); }
+            });
+        }
+        else if (av && real._cover_pending) items.push({
+            key: 'stop-retry', label: '停止重试',
+            onClick: function () { stopRetryForAv(av); }
         });
         if (av) items.push({
             key: 'cp-av', label: '复制 AV 号',
@@ -119,7 +146,12 @@
         // for recovered/terminal cards where nuking a possibly-wrong snapshot
         // actually means something. (real is the live loadCache re-read above,
         // so this self-corrects as the card transitions pending↔recovered.)
-        if (av && !real._pending) items.push({
+        // Also hidden while the av is user-stopped: "恢复重试" already IS a
+        // clear-and-refetch (resumeRetryForAv drops the caches and re-runs
+        // patchOnce), and a second button that clears the cache while every
+        // network path stays suppressed would only downgrade a patched card to
+        // a bare pending stub.
+        if (av && !real._pending && !stopped) items.push({
             // Label kept short to avoid wrapping inside bilibili's
             // fixed-width card-menu popper. "清除本条缓存并重新抓取" (11
             // chars) wrapped to two lines and the second line overflowed
@@ -127,6 +159,13 @@
             key: 'clear-cache', label: '清缓存并重抓',
             successMsg: '缓存已清除，重新抓取中',
             onClick: function () {
+                // An 'auto' 停止重试 record would silently gut this action:
+                // the caches would be dropped and then resolveItems would skip
+                // every network source, leaving the card worse off than before
+                // the click. An explicit user action overrides what the loop
+                // concluded, so drop that record too. (A 'user' record cannot be
+                // present — this item is not offered for stopped cards.)
+                clearNoRetry(av);
                 // Cache nuke for this av (GM item + in-memory rows + page
                 // promises). Shared with forceRefetch() via dropItemCaches so
                 // both paths really re-fetch instead of re-merging stale rows.

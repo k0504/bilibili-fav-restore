@@ -50,6 +50,7 @@ MANIFEST = [
     '05-sources.js',        # source intro doc, failure gate, SOURCES, normalizePublicResp
     '06-merge.js',          # QUALITY, FIELD_PRIORITY, mergeBySource
     '07-cache.js',          # persistent per-avid GM cache + in-memory page/item maps
+    '07a-noretry.js',       # user/auto "stop retrying" list (GM prefix noretry:av)
     '08-resolver.js',       # ensurePage, hasGoodCoverAndTitle, resolveItems
     '09-dom.js',            # URL/page detection + DOM scan + cover/title patch
     '10-tooltip.js',        # shared format helpers (esc/fmt*/pickPub*) + hover tooltip

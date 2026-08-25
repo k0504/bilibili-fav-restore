@@ -31,6 +31,16 @@
             toast('已清除 ' + n + ' 项缓存，正在刷新…', 'ok');
             setTimeout(function () { location.reload(); }, 600);
         });
+        GM_registerMenuCommand('fav-fix：清除所有「停止重试」标记', function () {
+            var c = clearAllNoRetry();
+            var n = c.user + c.auto;
+            if (!n) { toast('当前没有「停止重试」标记', 'ok'); return; }
+            toast('已清除 ' + n + ' 项停止重试标记（手动 ' + c.user + ' · 自动 ' + c.auto + '）', 'ok');
+            // Deliberately no reload: clearing the list changes no card's cached
+            // snapshot, only which badge the next render pass paints. A repaint
+            // is enough, and a reload would throw away a live flap loop.
+            schedule();
+        });
         GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', function () {
             // Async and long-running; nothing awaits it, so swallow rejections
             // here or an unexpected throw surfaces only as an unhandled

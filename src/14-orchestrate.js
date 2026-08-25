@@ -32,9 +32,24 @@
             // "重试中" badge while the loop is alive (it owns the retry and will
             // keep sampling on its backoff), a static "待重试" once the loop has
             // given up (only a fresh reload, after the short cache TTL, re-kicks
-            // it). Clear the first-pass loading overlay so the two don't stack.
+            // it), or a static "已停止重试" when the user switched this av off.
+            // Clear the first-pass loading overlay so the two don't stack.
             clearLoading(hit);
-            markPending(hit, _flapBgRunning);
+            // The stop list is queried LIVE (07a-noretry.js), never through a
+            // cache field: the user's press has to show on the very next render
+            // pass, and the decision must survive a cache purge that the merge
+            // record would not.
+            // Three-way, and the middle case is the one that bites: an av
+            // carrying an 'auto' record is NOT in the running loop's candidate
+            // set (resolveItems dropped it via isRetrySuppressed), so borrowing
+            // _flapBgRunning would paint 重试中 — spinner and all — on a card
+            // nothing is sampling, while the loop's own progress block counts
+            // "还剩 N 项" over a set that excludes it. Only a card the loop can
+            // actually be chasing may show 'active'.
+            var pav = real.oid != null ? String(real.oid) : null;
+            var pSuppressed = pav ? isRetrySuppressed(pav) : false;
+            markPending(hit, pav && isNoRetryUser(pav) ? 'stopped'
+                           : ((_flapBgRunning && !pSuppressed) ? 'active' : 'waiting'), pav);
             // Pending cards used to stop here with only a bare badge — no
             // tooltip, none of our menu items. Give them the same hover tooltip
             // (now a 重试中/待重试 state explainer) and card menu (now incl.

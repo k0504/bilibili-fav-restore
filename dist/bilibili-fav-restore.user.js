@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.12.0
+// @version      0.13.0
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.12.0)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.13.0)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.12.0';
+    var CORE_VERSION = '0.13.0';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -1053,6 +1053,19 @@
         if (v._cached_at && (Date.now() - v._cached_at > ttl)) return null;
         return v;
     }
+    // loadCache without the staleness test. The entry is past its TTL, but it
+    // is still the best thing this script knows about the av — and for an av on
+    // the 停止重试 list that is the whole story, because no network work will be
+    // scheduled to learn anything better. The resolver uses it there instead of
+    // overwriting a title-bearing merge with a bare _pending stub (08-resolver.js
+    // merge block). Deliberately does NOT refresh _cached_at: the entry has to
+    // stay stale so the first resolve after the suppression lapses re-fetches.
+    function loadCacheStale(av) {
+        var v = GM_getValue(CACHE_PREFIX + av, null);
+        if (!v) return null;
+        if (v._cache_version !== CACHE_VERSION) return null;
+        return v;
+    }
     function saveCache(av, merged) {
         merged._cache_version = CACHE_VERSION;
         merged._cached_at = Date.now();
@@ -1074,6 +1087,169 @@
             if (k.indexOf(CACHE_PREFIX) === 0) { GM_deleteValue(k); n++; }
         });
         return n;
+    }
+
+    // ─── "Stop retrying" list (user decision, deliberately NOT cache) ────
+    //
+    // Why this is its own GM prefix instead of a field on the item cache:
+    // the item cache (07-cache.js, `item:av…`) holds DERIVED data — every entry
+    // is re-fetchable, carries a TTL, and the "清除所有缓存" menu command wipes
+    // the lot. A user's decision to stop retrying a video is none of those
+    // things: it has to outlive the cache, survive a cache purge, and take
+    // effect the instant the badge is clicked instead of when the snapshot next
+    // expires. So it lives under its own prefix, is held in memory as a Set/Map
+    // for O(1) render-time lookups, and is read LIVE everywhere — the cached
+    // merge shape and CACHE_VERSION are untouched by this feature.
+    //
+    // Two modes, at most one record per av:
+    //   'user' — the user pressed 停止重试. Never expires.
+    //   'auto' — runFlapRecovery genuinely gave up on this av. Expires after
+    //            AUTO_NORETRY_TTL_MS, so a folder that merely flapped badly for
+    //            one afternoon is not written off permanently.
+    // 'user' overwrites 'auto'; 'auto' must NEVER overwrite 'user' (that would
+    // silently downgrade a permanent decision into one expiring in a week).
+    //
+    // Which predicate to use where:
+    //   isRetrySuppressed — every AUTOMATIC path (does resolveItems walk pages,
+    //                       does the background loop arm itself). Honours both
+    //                       modes.
+    //   isNoRetryUser     — everything the user explicitly triggered (manual
+    //                       retry, the loop's in-flight pruning). Honours the
+    //                       'user' mode only, because a manual retry means
+    //                       "ignore what the loop concluded and sample again".
+    //
+    // No new GM_* API is introduced: GM_getValue / GM_setValue / GM_deleteValue
+    // / GM_listValues are all already in the bootstrap @grant block. In
+    // particular GM_addValueChangeListener is NOT granted and the bootstrap
+    // @version is frozen at 1.0.0 (it is a contract — see AGENTS.md), so this
+    // list does NOT sync across tabs: a stop pressed in tab A is visible in
+    // tab B only after a reload. That limit is documented in README 已知限制;
+    // do not try to work around it here.
+
+    var NORETRY_PREFIX      = 'noretry:av';
+    var AUTO_NORETRY_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+
+    var _noRetryUser   = new Map();   // av → ms the user pressed stop (permanent)
+    var _noRetryAuto   = new Map();   // av → ms the loop gave up (7-day life)
+    var _noRetryLoaded = false;
+
+    // Build the in-memory index from GM storage once per page load, dropping
+    // auto records that have aged out on the way through so the store cannot
+    // grow without bound. Idempotent via _noRetryLoaded: boot() calls it once,
+    // and every accessor below calls it too, so a future change to boot order
+    // can never leave the list silently empty.
+    function loadNoRetryIndex() {
+        if (_noRetryLoaded) return;
+        _noRetryLoaded = true;
+        if (typeof GM_listValues !== 'function') {
+            // Same degradation as clearAllItemCache: warn and carry on with an
+            // empty list. Losing the feature is acceptable; throwing here would
+            // take boot() — and with it the whole resolve path — down with it.
+            warn('GM_listValues not granted — 停止重试 list unavailable');
+            return;
+        }
+        var now = Date.now(), expired = 0;
+        GM_listValues().forEach(function (k) {
+            if (k.indexOf(NORETRY_PREFIX) !== 0) return;
+            var av = k.slice(NORETRY_PREFIX.length);
+            var v = GM_getValue(k, null);
+            // Unreadable / shapeless record: drop it rather than guessing a
+            // mode, otherwise a corrupt entry suppresses an av forever with no
+            // way for the UI to show or clear it.
+            if (!v || (v.mode !== 'user' && v.mode !== 'auto')) { GM_deleteValue(k); return; }
+            if (v.mode === 'user') { _noRetryUser.set(av, v.at || 0); return; }
+            if (now - (v.at || 0) > AUTO_NORETRY_TTL_MS) { GM_deleteValue(k); expired++; return; }
+            _noRetryAuto.set(av, v.at || 0);
+        });
+        log('noretry: loaded', _noRetryUser.size, 'user +', _noRetryAuto.size,
+            'auto record(s)' + (expired ? ' (' + expired + ' expired auto dropped)' : ''));
+    }
+
+    // Manual, permanent stop. The card menu and the cover badge both ask this.
+    function isNoRetryUser(av) {
+        loadNoRetryIndex();
+        return _noRetryUser.has(String(av));
+    }
+
+    // When the user stopped this av, in ms — the tooltip prints it as
+    // 「已于 YYYY-MM-DD 停止」. null when the av is not on the user list, or
+    // when the record predates the timestamp being written.
+    function noRetryUserAt(av) {
+        loadNoRetryIndex();
+        return _noRetryUser.get(String(av)) || null;
+    }
+
+    // The gate for automatic network work: a manual stop, or an auto record the
+    // loop wrote less than AUTO_NORETRY_TTL_MS ago. Expired auto records are
+    // cleared on the spot so the storage entry disappears with the suppression.
+    function isRetrySuppressed(av) {
+        loadNoRetryIndex();
+        av = String(av);
+        if (_noRetryUser.has(av)) return true;
+        var at = _noRetryAuto.get(av);
+        if (at == null) return false;
+        if (Date.now() - at > AUTO_NORETRY_TTL_MS) { clearNoRetry(av); return false; }
+        return true;
+    }
+
+    function setNoRetryUser(av) {
+        loadNoRetryIndex();
+        av = String(av);
+        var at = Date.now();
+        _noRetryUser.set(av, at);
+        _noRetryAuto.delete(av);   // one record per av: user supersedes auto
+        try { GM_setValue(NORETRY_PREFIX + av, { at: at, mode: 'user' }); }
+        catch (e) { warn('setNoRetryUser failed for av', av, e); }
+    }
+
+    // Written by runFlapRecovery when it truly gives up (see its finally). A
+    // pre-existing user record outranks it and must survive untouched.
+    function markAutoNoRetry(av) {
+        loadNoRetryIndex();
+        av = String(av);
+        if (_noRetryUser.has(av)) return;
+        var at = Date.now();
+        _noRetryAuto.set(av, at);
+        try { GM_setValue(NORETRY_PREFIX + av, { at: at, mode: 'auto' }); }
+        catch (e) { warn('markAutoNoRetry failed for av', av, e); }
+    }
+
+    function clearNoRetry(av) {
+        loadNoRetryIndex();
+        av = String(av);
+        _noRetryUser.delete(av);
+        _noRetryAuto.delete(av);
+        GM_deleteValue(NORETRY_PREFIX + av);
+    }
+
+    // Returns what was cleared, so the menu command can report both modes.
+    function clearAllNoRetry() {
+        loadNoRetryIndex();
+        var counts = { user: _noRetryUser.size, auto: _noRetryAuto.size };
+        _noRetryUser.forEach(function (at, av) { GM_deleteValue(NORETRY_PREFIX + av); });
+        _noRetryAuto.forEach(function (at, av) { GM_deleteValue(NORETRY_PREFIX + av); });
+        _noRetryUser.clear();
+        _noRetryAuto.clear();
+        return counts;
+    }
+
+    function noRetryCounts() {
+        loadNoRetryIndex();
+        return { user: _noRetryUser.size, auto: _noRetryAuto.size };
+    }
+
+    // Flat dump for the debug surface (__biliFavFix.noRetry.list()).
+    function noRetryList() {
+        loadNoRetryIndex();
+        var out = [];
+        _noRetryUser.forEach(function (at, av) {
+            out.push({ av: av, mode: 'user', at: at, when: at ? new Date(at).toLocaleString() : null });
+        });
+        _noRetryAuto.forEach(function (at, av) {
+            out.push({ av: av, mode: 'auto', at: at, when: at ? new Date(at).toLocaleString() : null,
+                       expiresAt: at ? new Date(at + AUTO_NORETRY_TTL_MS).toLocaleString() : null });
+        });
+        return out;
     }
 
     // ─── Resolver ───────────────────────────────────────────────────────
@@ -1143,6 +1319,18 @@
         }
         log('todo', todoAvs.length, 'of', avs.length, '(cache hit', avs.length - todoAvs.length + ')');
 
+        // Avs the "停止重试" list (07a-noretry.js) still allows network work for.
+        // Both modes count here because this is the AUTOMATIC path. Everything
+        // below that costs a request is scoped to activeTodo; todoAvs keeps its
+        // full membership for phase 0 and for the merge, because neither of
+        // those touches the network and a suppressed av must still be
+        // classified (and restored from a local backup) exactly as before.
+        var activeTodo = todoAvs.filter(function (av) { return !isRetrySuppressed(av); });
+        if (activeTodo.length !== todoAvs.length) {
+            log('noretry: ' + (todoAvs.length - activeTodo.length) + ' of ' + todoAvs.length
+                + ' todo av(s) suppressed — no network retry for them this pass');
+        }
+
         var srcOrder = Object.keys(SOURCES);
 
         // Track which sources (paginated AND per-av) were attempted per av.
@@ -1179,21 +1367,32 @@
         }
 
         // ─── Phase 1: paginated sources (android, public) ────────────
-        // Walk pages of each enabled paginated source until every todoAv
+        // Walk pages of each enabled paginated source until every ACTIVE todoAv
         // appears or we hit MAX_PN. Page Promises are deduped by ensurePage.
-        for (var s = 0; s < srcOrder.length; s++) {
+        //
+        // The whole phase is skipped when every todo av is suppressed — this is
+        // the feature's main throttle: re-entering a folder whose invalid items
+        // were all abandoned must not fire a single request. attemptedPerAv is
+        // deliberately left alone for suppressed avs (nothing was queried, so
+        // claiming "已查询但无记录" would be a lie), and the walk's termination
+        // test must read activeTodo too: with todoAvs it would never see
+        // allFound for a suppressed av and would run the full MAX_PAGE_WALK.
+        if (!activeTodo.length && todoAvs.length) {
+            log('phase 1 skipped — all', todoAvs.length, 'todo av(s) on the 停止重试 list');
+        }
+        for (var s = 0; activeTodo.length && s < srcOrder.length; s++) {
             var src = srcOrder[s];
             var def = SOURCES[src];
             if (!def.enabled())  { log(src, 'disabled, skip'); continue; }
             if (!def.paginated)  continue;
-            // Mark every todoAv as attempted up-front: paginated sources
+            // Mark every active todoAv as attempted up-front: paginated sources
             // fetch the entire page, so each av is implicitly looked up
             // whether or not the response actually contains it. "Got no
             // record" = the av wasn't in the response.
-            todoAvs.forEach(function (av) { markAttempted(av, src); });
+            activeTodo.forEach(function (av) { markAttempted(av, src); });
             var pn = 1, MAX_PN = MAX_PAGE_WALK;
             while (pn <= MAX_PN) {
-                var allFound = todoAvs.every(function (av) { return pageItems.has(src + '|' + av); });
+                var allFound = activeTodo.every(function (av) { return pageItems.has(src + '|' + av); });
                 if (allFound) break;
                 var page;
                 try { page = await ensurePage(src, mediaId, pn); }
@@ -1246,7 +1445,10 @@
                 warn('phase 2 budget exhausted, skipping remaining sources (e.g. ' + src + ')');
                 break;
             }
-            var needed = todoAvs.filter(function (av) { return !hasGoodCoverAndTitle(av); });
+            // activeTodo, not todoAvs: a suppressed av must not cost a
+            // third-party request either. Its merge still lands as _pending —
+            // the classification describes the DATA, not our intent to chase it.
+            var needed = activeTodo.filter(function (av) { return !hasGoodCoverAndTitle(av); });
             if (needed.length === 0) { log(src, 'all avs already good, skip'); continue; }
             needed.forEach(function (av) { markAttempted(av, src); });
             // Race fetchAvs against the remaining budget so even an
@@ -1292,7 +1494,28 @@
             var attempted = attemptedPerAv.get(av);
             var rec;
             if (Object.keys(perSource).length === 0) {
-                // No source returned this av this pass.
+                // No source returned this av this pass. For a SUPPRESSED av
+                // that is not a finding: phase 1 was skipped and phase 2 never
+                // asked for it, so an empty perSource means "we did not look",
+                // not "nobody has it". Writing the bare _pending stub below
+                // would overwrite the previous merge — typically a
+                // _cover_pending record whose title / UP / date are already
+                // patched onto the card — and nothing would ever restore it,
+                // because every automatic path stays switched off until the
+                // record expires (each later visit would rewrite the same
+                // stub). Serve the stored merge past its staleness TTL instead
+                // and leave storage untouched. This is the hazard 11-menu.js
+                // already guards on the manual path by clearing the record
+                // before 清缓存并重抓; the TTL-expiry path needs it too.
+                if (isRetrySuppressed(av)) {
+                    var kept = loadCacheStale(av);
+                    if (kept) {
+                        log('av', av, 'suppressed and not queried this pass — keeping the stored merge'
+                            + ' instead of overwriting it with a pending stub');
+                        result.set(av, kept);
+                        return;
+                    }
+                }
                 rec = {
                     oid: Number(av),
                     // _attempted: union of every source that queried this av
@@ -1356,6 +1579,10 @@
             todoAvs.forEach(function (av) {
                 var m = result.get(av);
                 if (!m) return;
+                // Suppressed avs keep their _pending / _cover_pending marker but
+                // must not arm the loop — otherwise "停止重试" would stop the
+                // page walk and still spend four minutes sampling android.
+                if (isRetrySuppressed(av)) return;
                 if (m._pending) bgCandidates.push(av);
                 else if (m._cover_pending) { bgCandidates.push(av); bgCoverOnly.push(av); }
             });
@@ -1376,6 +1603,12 @@
     // filtering dropped. There is no other retry path — no cache-TTL timer, no
     // scroll-to-retry; the short _pending TTL in 07-cache.js is now purely a
     // staleness guard for a future fresh page load, NOT a retry trigger.
+    //
+    // It is no longer started unconditionally: resolveItems drops avs on the
+    // 停止重试 list (07a-noretry.js) from its candidate set, this loop prunes
+    // avs the user stops mid-run at the top of every round, and its finally
+    // records an auto stop for whatever it genuinely gave up on — so the same
+    // hopeless folder is not re-sampled from scratch on every visit.
     //
     // Adaptive backoff (FLAP_BACKOFF_MS / FLAP_MAX_DRY in 01-constants.js): the
     // `dry` counter drives BOTH cadence and termination. A walk that recovers
@@ -1399,8 +1632,9 @@
     // cover+title in place — no stored DOM hits to go stale across bilibili's
     // virtualized scroll, no spinner re-flash (recovered avs hit the cache fast
     // path, not the resolver). Cards still pending while the loop is alive show
-    // a "重试中" badge (markPending reads _flapBgRunning); they flip to "待重试"
-    // only once the loop terminates (the finally's schedule()).
+    // a "重试中" badge (applyPatch reads _flapBgRunning); they flip to "待重试"
+    // only once the loop terminates (the finally's schedule()), or to
+    // "已停止重试" the moment the user is on the stop list.
     //
     // Concurrency / race notes:
     //   - Single loop at a time (_flapBgRunning, true for the loop's WHOLE life
@@ -1453,6 +1687,27 @@
         var needCover = new Set((coverNeeded || []).map(String));
         var deadline = Date.now() + FLAP_TIME_BUDGET_MS;
         var walk = 0, dry = 0;
+        // Consecutive walks whose android requests ALL threw — an expired /
+        // invalidated access_key (code -101), risk control (-352), a few
+        // minutes offline. android has no sourceFailureGate (05-sources.js only
+        // checks that an access_key string exists) and nothing clears the key on
+        // an API error, so such a run continues until this loop stops it. Those
+        // walks sample NOTHING, so they must not feed `dry`: otherwise a
+        // transient outage stamps 7-day auto 停止重试 records on a whole folder
+        // on the strength of zero evidence, and the next visit (phase 1 skipped,
+        // loop never armed) does no network work at all. They still widen the
+        // backoff and still terminate the loop — but without a verdict.
+        var errRun = 0;
+        // Did any walk ever obtain a sample? Guards the budget-exhausted exit
+        // below for the same reason.
+        var everSampled = false;
+        // Did the loop reach a CONCLUSION (dry ran out / the 30-minute budget
+        // did), as opposed to being interrupted? Only a conclusion may write the
+        // auto 停止重试 records in the finally. Re-deriving this from `dry` down
+        // there would misfire: a folder switch can abort the loop at a moment
+        // when dry happens to sit at FLAP_MAX_DRY, and an interrupted loop is
+        // not a verdict on a folder it never finished sampling.
+        var gaveUp = false;
         _flapProgress = {
             mediaId: mediaId, startedAt: Date.now(), deadline: deadline,
             total: pending.size, remaining: pending.size,
@@ -1464,29 +1719,64 @@
                 Array.from(pending).slice(0, 5).join(',') + (pending.size > 5 ? ',…' : ''));
             while (pending.size && dry < FLAP_MAX_DRY) {
                 if (detectMediaId() !== mediaId) { log('flap-bg: folder changed, abort'); break; }
-                if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); break; }
+                // Budget exhausted counts as a conclusion only if android
+                // answered at least once: 30 minutes of failed requests is a
+                // statement about the connection, not about the videos.
+                if (Date.now() > deadline)       { log('flap-bg: 30-min budget exhausted'); gaveUp = everSampled; break; }
+                // Drop anything the user stopped WHILE the loop was running:
+                // pressing 停止重试 has to take effect on the next round, not
+                // whenever the loop happens to run out of budget. Only the
+                // 'user' mode is honoured — the 'auto' records are written by
+                // THIS loop's own finally, and a manual re-arm exists precisely
+                // to override them.
+                var stopped = 0;
+                Array.from(pending).forEach(function (av) {
+                    if (isNoRetryUser(av)) { pending.delete(av); stopped++; }
+                });
+                if (stopped) log('flap-bg: dropped', stopped, 'candidate(s) the user stopped');
+                // Pending emptied by those stops is NOT a give-up: there is
+                // nothing left to record, and the loop simply retires.
+                if (!pending.size) { log('flap-bg: no candidates left to chase'); break; }
                 walk++;
                 _flapProgress.walk = walk;
                 _flapProgress.phase = 'walking';
                 _flapProgress.remaining = pending.size;
 
                 // One fresh android walk straight into pageItems.
+                //   sampledOk — this walk actually holds android's answer about
+                //     the candidates: a page came back, or every candidate
+                //     already has a row so there was nothing left to ask for.
+                //     A walk whose every request threw has neither.
+                //   interrupted — a folder switch truncated the walk. The
+                //     observer's dropAllInMemory() has cleared pageItems out
+                //     from under it, so the promotion pass below can recover
+                //     nothing BY CONSTRUCTION; that is not a result either.
+                var sampledOk = false, interrupted = false;
                 var pn = 1;
                 while (pn <= MAX_PAGE_WALK) {
-                    if (detectMediaId() !== mediaId || Date.now() > deadline) break;
+                    if (detectMediaId() !== mediaId) { interrupted = true; break; }
+                    if (Date.now() > deadline) break;
                     var allFound = true;
                     pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
-                    if (allFound) break;
+                    if (allFound) { sampledOk = true; break; }
                     _flapProgress.page = pn;
                     var page;
                     try { page = await SOURCES.android.fetchPage({ mediaId: mediaId, pn: pn }); }
                     catch (e) { warn('flap-bg walk ' + walk + ' pn ' + pn + ' failed:', e.message); break; }
+                    sampledOk = true;
                     (page.list || []).forEach(function (it) {
                         if (it && it.oid != null) pageItems.set('android|' + it.oid, it);
                     });
                     if (!page.has_more) break;
                     pn++;
                 }
+                // Leave before an interrupted walk can be read as a verdict. The
+                // top-of-loop guard would break next round anyway — but only
+                // AFTER this round's dry++ had possibly pushed `dry` to
+                // FLAP_MAX_DRY and stamped auto records on every remaining av of
+                // the folder the user has just left.
+                if (interrupted) { log('flap-bg: folder changed mid-walk, abort'); break; }
+                if (sampledOk) everSampled = true;
 
                 // Promote any candidate android now covers with usable data.
                 var recovered = [];
@@ -1510,12 +1800,20 @@
                 });
 
                 if (recovered.length) {
-                    dry = 0;   // progress → reset cadence to the burst gap and keep sampling fast
+                    dry = 0; errRun = 0;   // progress → reset cadence to the burst gap and keep sampling fast
                     log('flap-bg walk ' + walk + ': recovered', recovered.length,
                         '→ re-patch;', pending.size, 'left');
                     // Upgrade on-screen cards via the normal fast path.
                     schedule();
+                } else if (!sampledOk) {
+                    // android never answered. Back off exactly like a dry walk
+                    // does, but do not count it as one — the candidates were not
+                    // sampled, so there is nothing to conclude about them.
+                    errRun++;
+                    log('flap-bg walk ' + walk + ': android unreachable (' + errRun + '/' + FLAP_MAX_DRY
+                        + ' consecutive) — not counted toward dry');
                 } else {
+                    errRun = 0;
                     dry++;     // no progress → widen the gap, step toward giving up
                     log('flap-bg walk ' + walk + ': 0 new (dry ' + dry + '/' + FLAP_MAX_DRY + ')');
                 }
@@ -1523,12 +1821,23 @@
                 _flapProgress.lastRecovered = recovered.length;
                 _flapProgress.remaining = pending.size;
 
-                if (!pending.size || dry >= FLAP_MAX_DRY) break;
+                if (!pending.size || dry >= FLAP_MAX_DRY || errRun >= FLAP_MAX_DRY) {
+                    if (dry >= FLAP_MAX_DRY) gaveUp = true;
+                    // An error run stops the loop WITHOUT a verdict: the cards
+                    // stay 待重试 and a reload — or 立即重试, or the user simply
+                    // logging in again — re-arms the loop exactly as before.
+                    else if (errRun >= FLAP_MAX_DRY) log('flap-bg: stopping for now — ' + errRun
+                        + ' consecutive walk(s) could not reach android; no auto 停止重试 written');
+                    break;
+                }
 
                 // Adaptive backoff before the next walk: gap widens with `dry`.
                 // Sleep in ~1s slices so a folder switch / budget expiry breaks
                 // out within a second (frees _flapBgRunning for the next folder).
-                var gap = FLAP_BACKOFF_MS[Math.min(dry, FLAP_BACKOFF_MS.length - 1)];
+                // Widen on whichever counter is running: a failing android must
+                // back off just as a fruitless one does, or an outage would be
+                // hammered at the 1s burst gap.
+                var gap = FLAP_BACKOFF_MS[Math.min(Math.max(dry, errRun), FLAP_BACKOFF_MS.length - 1)];
                 var until = Date.now() + gap;
                 _flapProgress.phase = 'sleeping';
                 _flapProgress.nextWalkAt = until;
@@ -1542,13 +1851,26 @@
         } finally {
             _flapBgRunning = false;
             _flapProgress = null;
+            // Auto 停止重试 records — written ONLY when the loop reached a
+            // conclusion (gaveUp). They expire after 7 days, so the next visit
+            // within that window skips the page walk entirely instead of
+            // re-running ~4 minutes of sampling for items that are almost
+            // certainly deleted; after it, the folder gets a fresh chance.
+            if (gaveUp && pending.size) {
+                pending.forEach(function (av) { markAutoNoRetry(av); });
+                log('flap-bg: recorded auto 停止重试 for', pending.size, 'av(s)');
+            }
             // Remember the avs we gave up on so a card's "立即重试" can re-arm
             // the loop over the WHOLE leftover set (not just the clicked card).
             // If the loop recovered everything, pending is empty → no leftover →
             // the retry menu item won't render (cards are no longer _pending).
-            _flapLeftover = new Set(pending);
+            // Avs the user stopped are excluded: the leftover set is the manual
+            // re-arm's payload, and a manual retry must never resurrect a card
+            // whose retries the user switched off.
+            _flapLeftover = new Set();
+            pending.forEach(function (av) { if (!isNoRetryUser(av)) _flapLeftover.add(av); });
             _flapLeftoverCover = new Set();
-            pending.forEach(function (av) { if (needCover.has(av)) _flapLeftoverCover.add(av); });
+            _flapLeftover.forEach(function (av) { if (needCover.has(av)) _flapLeftoverCover.add(av); });
             _flapLeftoverMid = mediaId;
             // Re-run the patch pass with the loop now inactive so any still-
             // pending cards flip their badge from "重试中" to "待重试".
@@ -1572,6 +1894,12 @@
         var cands     = sameFolder ? Array.from(_flapLeftover)      : [];
         var coverOnly = sameFolder ? Array.from(_flapLeftoverCover) : [];
         if (!cands.length && clickedAv) { cands = [String(clickedAv)]; coverOnly = []; }
+        // Honour the user's manual stops only. An 'auto' record is exactly what
+        // this button is for overriding — the user is telling us to ignore the
+        // loop's give-up and sample once more — but a card the user stopped
+        // by hand must stay stopped even when it rides along in the leftover set.
+        cands     = cands.filter(function (av) { return !isNoRetryUser(av); });
+        coverOnly = coverOnly.filter(function (av) { return !isNoRetryUser(av); });
         if (!cands.length) { toast('没有待重试的视频', 'ok'); return; }
         // The leftover set can also hold cards that ARE patched and only lack a
         // cover, so the wording is deliberately not "待重试" alone.
@@ -1993,14 +2321,29 @@
         // Pending — still being chased by the background android flap loop, or
         // waiting for a future retry after it gave up. There's no good snapshot
         // yet, so render a state-aware explainer (NOT the normal rich layout
-        // with empty fields). _flapBgRunning is read LIVE here — showTip rebuilds
-        // innerHTML on every hover — so the text tracks whether the loop is
-        // currently alive (重试中) or has stopped (待重试), matching the badge.
+        // with empty fields). _flapBgRunning and the 停止重试 list are read LIVE
+        // here — showTip rebuilds innerHTML on every hover, and once a second
+        // while hovering — so the text tracks all three badge states: the loop
+        // is alive (重试中), it gave up (待重试), or the user switched this av
+        // off (已停止重试). The stopped copy is static, which makes the
+        // once-a-second rebuild harmless rather than something to special-case.
         if (real._pending) {
             var pav = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : '');
             var pbv = real.bvid || (pav ? avToBv(pav) : null);
-            var pActive = _flapBgRunning;
-            var pHead = pActive ? '正在找回此视频快照…' : '暂未找回，等待重试';
+            // Third, highest-priority state: the user pressed 停止重试. Read
+            // live from the list (07a-noretry.js), same as the badge — the flap
+            // loop's liveness is irrelevant once the av is switched off.
+            var pStopped = pav ? isNoRetryUser(pav) : false;
+            // Fourth state, and the one the copy below has to distinguish: the
+            // loop gave up on this av and recorded an 'auto' 停止重试 (7 days).
+            // Nothing is chasing it — resolveItems keeps it out of the walk AND
+            // out of the loop's candidate set — so it must neither borrow a
+            // running loop's 重试中 wording nor be told that reloading retries.
+            var pPaused = !pStopped && pav ? isRetrySuppressed(pav) : false;
+            var pActive = !pStopped && !pPaused && _flapBgRunning;
+            var pHead = pStopped ? '已停止重试'
+                      : (pActive ? '正在找回此视频快照…'
+                      : (pPaused ? '暂未找回，自动重试已暂停' : '暂未找回，等待重试'));
 
             // Live status block: only while the loop is actually running AND its
             // progress belongs to THIS folder (the loop nulls _flapProgress on
@@ -2026,9 +2369,24 @@
                          + '</div>';
             }
 
-            var pBody = pActive
+            var pBody = pStopped
+                ? '此视频的自动重试已由你手动停止，脚本不会再为它请求任何接口。点封面左上角的徽章，或在本卡片右上「···」菜单选「恢复重试」，即可恢复并立即重新抓取一轮。'
+                : (pActive
                 ? 'bilibili 的 android 收藏接口会随机漏掉一部分失效视频，脚本正在后台多次重新采样把它捞回来。找回后本卡片会自动更新封面与标题，无需手动操作。'
-                : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。';
+                : (pPaused
+                // The give-up copy below promises that a reload re-tries. With
+                // an auto record in place that is false: the next resolve skips
+                // the page walk for this av entirely. Say what actually happens.
+                ? '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。为避免每次进入收藏夹都重跑一轮，脚本已暂停对它的自动重试，约一周后自动恢复；期间重新整理本页不会再为它请求接口。如需立刻再试一轮，可在本卡片右上「···」菜单点「立即重试」。'
+                : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。'));
+            // When the stop was recorded. Only for the manual mode: an auto
+            // record is not the user's decision and has no place in a tooltip
+            // that tells them what they themselves switched off.
+            var pStoppedAt = pStopped ? noRetryUserAt(pav) : null;
+            var pStoppedAtHtml = pStoppedAt
+                ? '<div style="margin-top:4px;color:#8a8a92;font-size:11px">已于 '
+                  + esc(fmtTime(Math.floor(pStoppedAt / 1000))) + ' 停止</div>'
+                : '';
             return '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:#fff;'
                  + 'line-height:1.35;border-bottom:1px solid rgba(255,255,255,.12);padding-bottom:6px">'
                  + esc(pHead) + '</div>'
@@ -2037,8 +2395,11 @@
                  + liveHtml
                  + '<div style="margin-top:6px;color:#bdbdc2;font-size:11px;line-height:1.55">'
                  + esc(pBody) + '</div>'
+                 + pStoppedAtHtml
                  + '<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#666;font-size:10px">'
-                 + 'fav-fix · ' + (pActive ? '重试中（后台自动）' : '待重试') + '</div>';
+                 + 'fav-fix · ' + (pStopped ? '已停止重试'
+                                : (pActive ? '重试中（后台自动）'
+                                : (pPaused ? '待重试（自动重试已暂停）' : '待重试'))) + '</div>';
         }
 
         var parts = [];
@@ -2259,12 +2620,39 @@
         // current.)
         if (av) { var _lc = loadCache(av); if (_lc) real = _lc; }
         var bv = real.bvid || (av ? avToBv(av) : null);
+        // Same live-read reasoning as the loadCache line above, for the same
+        // reason: the user may have stopped or resumed this av since the
+        // dropdown was bound, and the closure would show the stale action.
+        var stopped = av ? isNoRetryUser(av) : false;
         var items = [];
-        // Primary action for a still-pending card: re-arm THE flap loop now
-        // instead of waiting for the next page reload. Only shown while _pending.
-        if (av && real._pending) items.push({
-            key: 'retry', label: '立即重试',
-            onClick: function () { kickManualRetry(av); }
+        // Retry controls, mutually exclusive by card state (the existing
+        // 立即重试 / 清缓存并重抓 split, now with the stop switch folded in):
+        //   stopped                       → 恢复重试 only. Offering 立即重试 next
+        //                                   to it would be two buttons for one
+        //                                   decision the user already made.
+        //   _pending                      → 立即重试 (re-arm now) + 停止重试.
+        //   _cover_pending                → 停止重试 only. Those cards are
+        //                                   already patched and carry NO badge
+        //                                   (the cover is being chased quietly
+        //                                   in the background), so the menu is
+        //                                   the single entry point for them.
+        if (av && stopped) items.push({
+            key: 'retry', label: '恢复重试',
+            onClick: function () { resumeRetryForAv(av); }
+        });
+        else if (av && real._pending) {
+            items.push({
+                key: 'retry', label: '立即重试',
+                onClick: function () { kickManualRetry(av); }
+            });
+            items.push({
+                key: 'stop-retry', label: '停止重试',
+                onClick: function () { stopRetryForAv(av); }
+            });
+        }
+        else if (av && real._cover_pending) items.push({
+            key: 'stop-retry', label: '停止重试',
+            onClick: function () { stopRetryForAv(av); }
         });
         if (av) items.push({
             key: 'cp-av', label: '复制 AV 号',
@@ -2308,7 +2696,12 @@
         // for recovered/terminal cards where nuking a possibly-wrong snapshot
         // actually means something. (real is the live loadCache re-read above,
         // so this self-corrects as the card transitions pending↔recovered.)
-        if (av && !real._pending) items.push({
+        // Also hidden while the av is user-stopped: "恢复重试" already IS a
+        // clear-and-refetch (resumeRetryForAv drops the caches and re-runs
+        // patchOnce), and a second button that clears the cache while every
+        // network path stays suppressed would only downgrade a patched card to
+        // a bare pending stub.
+        if (av && !real._pending && !stopped) items.push({
             // Label kept short to avoid wrapping inside bilibili's
             // fixed-width card-menu popper. "清除本条缓存并重新抓取" (11
             // chars) wrapped to two lines and the second line overflowed
@@ -2316,6 +2709,13 @@
             key: 'clear-cache', label: '清缓存并重抓',
             successMsg: '缓存已清除，重新抓取中',
             onClick: function () {
+                // An 'auto' 停止重试 record would silently gut this action:
+                // the caches would be dropped and then resolveItems would skip
+                // every network source, leaving the card worse off than before
+                // the click. An explicit user action overrides what the loop
+                // concluded, so drop that record too. (A 'user' record cannot be
+                // present — this item is not offered for stopped cards.)
+                clearNoRetry(av);
                 // Cache nuke for this av (GM item + in-memory rows + page
                 // promises). Shared with forceRefetch() via dropItemCaches so
                 // both paths really re-fetch instead of re-merging stale rows.
@@ -2621,14 +3021,22 @@
     // ─── Retry indicator (background android flap recovery) ──────────────
     //   A small corner badge on the cover so the user can SEE that a deleted
     //   item is being re-fetched in the background (runFlapRecovery), instead
-    //   of the card looking inert. Two states:
-    //     active=true  → spinning dot + "重试中" (loop alive — owns the retry,
-    //                    keeps sampling android on its backoff)
-    //     active=false → static gray + "待重试" (loop gave up; a fresh reload
-    //                    re-kicks it, OR the card's "立即重试" menu item does so
-    //                    on demand via kickManualRetry)
-    //   The badge is just the at-a-glance cue; the FULL explanation of what
-    //   重试中/待重试 mean lives in the card's hover tooltip (buildTipHtml's
+    //   of the card looking inert — and, since 0.13.0, the switch that turns
+    //   that retrying off. Three states, passed as a string:
+    //     'active'  → spinning dot + "重试中" (loop alive — owns the retry,
+    //                 keeps sampling android on its backoff)
+    //     'waiting' → pulsing gray + "待重试" (loop gave up; a fresh reload
+    //                 re-kicks it, OR the card's "立即重试" menu item does so
+    //                 on demand via kickManualRetry)
+    //     'stopped' → static dark gray + "已停止重试" (the user pressed the
+    //                 badge; the av is on the 停止重试 list and no automatic
+    //                 path will request it again)
+    //   Hovering swaps the label to the action the click performs (停止重试 /
+    //   恢复重试). That swap is PURE CSS — two spans, one hidden by :hover —
+    //   because MutationObserver re-runs the patch pass constantly and a JS
+    //   textContent swap would fight the hover state on every tick.
+    //   The badge is just the at-a-glance cue; the FULL explanation of what the
+    //   three states mean lives in the card's hover tooltip (buildTipHtml's
     //   _pending branch), bound for pending cards via bindCardAffordances.
     //   Removed by clearPending() the moment the item recovers (real cover) or
     //   is written terminal. Distinct from markLoading's full-cover overlay so
@@ -2648,8 +3056,12 @@
             '  padding:3px 7px; border-radius:10px;',
             '  font:600 11px/1 -apple-system,Segoe UI,sans-serif;',
             '  color:#fff; background:rgba(192,57,43,.82);',
-            '  pointer-events:none; user-select:none;',
+            // The badge is a BUTTON now, so it has to receive the pointer —
+            // but only the root: children with their own hit area would let a
+            // click land on a node whose handler we never bound.
+            '  pointer-events:auto; cursor:pointer; user-select:none;',
             '}',
+            '.fav-fix-retry-badge > * { pointer-events:none; }',
             '.fav-fix-retry-badge .fav-fix-retry-dot {',
             '  width:9px; height:9px; border-radius:50%;',
             '  border:2px solid rgba(255,255,255,.4); border-top-color:#fff;',
@@ -2659,12 +3071,110 @@
             '  background:rgba(127,140,141,.8);',
             '  animation:__fav_fix_retry_pulse 1.8s ease-in-out infinite;',
             '}',
-            '.fav-fix-retry-badge.waiting .fav-fix-retry-dot { animation:none; border-top-color:rgba(255,255,255,.55); }'
+            '.fav-fix-retry-badge.waiting .fav-fix-retry-dot { animation:none; border-top-color:rgba(255,255,255,.55); }',
+            // Stopped: no animation anywhere and no spinner dot — the card must
+            // read as "nothing is happening here", which is the whole point.
+            '.fav-fix-retry-badge.stopped {',
+            '  background:rgba(60,64,67,.88);',
+            '  animation:none;',
+            '}',
+            '.fav-fix-retry-badge.stopped .fav-fix-retry-dot { display:none; }',
+            // Label swap on hover, CSS-only (see the block comment above).
+            '.fav-fix-retry-badge .fav-fix-retry-hover { display:none; }',
+            '.fav-fix-retry-badge:hover .fav-fix-retry-idle { display:none; }',
+            '.fav-fix-retry-badge:hover .fav-fix-retry-hover { display:inline; }'
         ].join('\n');
         (document.head || document.documentElement).appendChild(st);
     }
 
-    function markPending(hit, active) {
+    // Resting label / hover label per state. The hover label always names the
+    // ACTION the click performs, never the state it is in.
+    var RETRY_BADGE_TEXT = {
+        active:  { idle: '重试中',     hover: '停止重试' },
+        waiting: { idle: '待重试',     hover: '停止重试' },
+        stopped: { idle: '已停止重试', hover: '恢复重试' }
+    };
+
+    // Write a state onto an existing badge. Early-returns when the state is
+    // unchanged so the observer's repeated patch passes don't churn text nodes
+    // under the user's cursor. data-fav-fix-retry-state is also the click
+    // handler's source of truth (see bindRetryBadge).
+    function applyRetryBadgeState(badge, state) {
+        if (!RETRY_BADGE_TEXT[state]) state = 'waiting';
+        if (badge.getAttribute('data-fav-fix-retry-state') === state) return;
+        badge.setAttribute('data-fav-fix-retry-state', state);
+        badge.classList.toggle('waiting', state === 'waiting');
+        badge.classList.toggle('stopped', state === 'stopped');
+        var idle  = badge.querySelector('[data-fav-fix-retry-txt]');
+        var hover = badge.querySelector('[data-fav-fix-retry-hover]');
+        if (idle)  idle.textContent  = RETRY_BADGE_TEXT[state].idle;
+        if (hover) hover.textContent = RETRY_BADGE_TEXT[state].hover;
+    }
+
+    // The two user-facing transitions, defined once so the cover badge, the
+    // card menu (11-menu.js) and the debug surface (17-boot.js) cannot drift.
+    function stopRetryForAv(av) {
+        setNoRetryUser(av);
+        toast('已停止重试，可再次点击恢复', 'ok');
+        // Repaint so any other card of the same av (and the badge, when the
+        // caller did not update it in place) reflects the new state.
+        schedule();
+    }
+    function resumeRetryForAv(av) {
+        clearNoRetry(av);
+        // Drop the _pending stub as well: with the suppression gone the whole
+        // point is to ask the network again, and a live short-TTL stub would
+        // have patchOnce serve the cached "still nothing" instead.
+        dropItemCaches(av);
+        toast('已恢复重试，正在重新抓取', 'ok');
+        patchOnce().catch(function (e) { warn('resume-retry patchOnce threw:', e); });
+    }
+
+    // Bind the badge's click ONCE per element. Idempotent via __favFixBadgeBound
+    // because markPending re-runs on every observer tick for the same node.
+    function bindRetryBadge(badge) {
+        if (badge.__favFixBadgeBound) return;
+        badge.__favFixBadgeBound = true;
+        // The badge sits inside the card, and the card is an <a>. stopPropagation
+        // keeps the event away from the card's own handlers and from bilibili's
+        // document-level delegates, but it does NOT stop the anchor's default
+        // navigation — that needs preventDefault. Both are applied to mousedown
+        // as well as click: bilibili has document-level listeners that rewrite
+        // anchor behaviour (AGENTS.md gotcha 20, last bullet — an <a> appended to
+        // the document had its blob: href hijacked and navigated the whole tab),
+        // and some of that machinery acts before a click event ever exists.
+        var swallow = function (e) { e.preventDefault(); e.stopPropagation(); };
+        badge.addEventListener('mousedown', swallow);
+        badge.addEventListener('click', function (e) {
+            swallow(e);
+            // Read av + state from the DOM at click time, never from a closure:
+            // this node is reused by later render passes (and by bilibili's
+            // virtualized scroll), so a captured value goes stale the moment the
+            // card's state — or the card itself — changes.
+            var av = badge.getAttribute('data-fav-fix-retry-av');
+            if (!av) return;
+            if (badge.getAttribute('data-fav-fix-retry-state') === 'stopped') {
+                // Flip out of 'stopped' HERE, for the same reason the stop
+                // direction flips in place below — only more so: nothing
+                // repaints this card until applyPatch runs after the whole
+                // resolve (phase 2 alone is budgeted at 10s), and the loading
+                // overlay sits BELOW the badge, so a badge still reading
+                // 已停止重试 stays visible and clickable throughout. A second
+                // click would re-enter resumeRetryForAv: another cache drop,
+                // another toast, and a _patchDirty second full resolve pass.
+                applyRetryBadgeState(badge, _flapBgRunning ? 'active' : 'waiting');
+                resumeRetryForAv(av);
+            } else {
+                // Flip the badge in place rather than waiting for the next
+                // render pass: the flap loop may be mid-backoff and nothing else
+                // would touch this card for up to two minutes.
+                applyRetryBadgeState(badge, 'stopped');
+                stopRetryForAv(av);
+            }
+        });
+    }
+
+    function markPending(hit, state, av) {
         if (!hit || !hit.img) return;          // need a cover area to anchor to
         var coverWrap = hit.img.parentElement;
         if (!coverWrap) return;
@@ -2680,14 +3190,21 @@
             var dot = document.createElement('span');
             dot.className = 'fav-fix-retry-dot';
             var txt = document.createElement('span');
+            txt.className = 'fav-fix-retry-idle';
             txt.setAttribute('data-fav-fix-retry-txt', '1');
+            var hov = document.createElement('span');
+            hov.className = 'fav-fix-retry-hover';
+            hov.setAttribute('data-fav-fix-retry-hover', '1');
             badge.appendChild(dot);
             badge.appendChild(txt);
+            badge.appendChild(hov);
             coverWrap.appendChild(badge);
         }
-        badge.classList.toggle('waiting', !active);
-        var t = badge.querySelector('[data-fav-fix-retry-txt]');
-        if (t) t.textContent = active ? '重试中' : '待重试';
+        // Re-stamped every pass: the same badge node can end up serving a
+        // different card after a virtualized re-render.
+        badge.setAttribute('data-fav-fix-retry-av', av == null ? '' : String(av));
+        applyRetryBadgeState(badge, state);
+        bindRetryBadge(badge);
     }
 
     function clearPending(hit) {
@@ -3171,9 +3688,24 @@
             // "重试中" badge while the loop is alive (it owns the retry and will
             // keep sampling on its backoff), a static "待重试" once the loop has
             // given up (only a fresh reload, after the short cache TTL, re-kicks
-            // it). Clear the first-pass loading overlay so the two don't stack.
+            // it), or a static "已停止重试" when the user switched this av off.
+            // Clear the first-pass loading overlay so the two don't stack.
             clearLoading(hit);
-            markPending(hit, _flapBgRunning);
+            // The stop list is queried LIVE (07a-noretry.js), never through a
+            // cache field: the user's press has to show on the very next render
+            // pass, and the decision must survive a cache purge that the merge
+            // record would not.
+            // Three-way, and the middle case is the one that bites: an av
+            // carrying an 'auto' record is NOT in the running loop's candidate
+            // set (resolveItems dropped it via isRetrySuppressed), so borrowing
+            // _flapBgRunning would paint 重试中 — spinner and all — on a card
+            // nothing is sampling, while the loop's own progress block counts
+            // "还剩 N 项" over a set that excludes it. Only a card the loop can
+            // actually be chasing may show 'active'.
+            var pav = real.oid != null ? String(real.oid) : null;
+            var pSuppressed = pav ? isRetrySuppressed(pav) : false;
+            markPending(hit, pav && isNoRetryUser(pav) ? 'stopped'
+                           : ((_flapBgRunning && !pSuppressed) ? 'active' : 'waiting'), pav);
             // Pending cards used to stop here with only a bare badge — no
             // tooltip, none of our menu items. Give them the same hover tooltip
             // (now a 重试中/待重试 state explainer) and card menu (now incl.
@@ -5533,6 +6065,16 @@
             toast('已清除 ' + n + ' 项缓存，正在刷新…', 'ok');
             setTimeout(function () { location.reload(); }, 600);
         });
+        GM_registerMenuCommand('fav-fix：清除所有「停止重试」标记', function () {
+            var c = clearAllNoRetry();
+            var n = c.user + c.auto;
+            if (!n) { toast('当前没有「停止重试」标记', 'ok'); return; }
+            toast('已清除 ' + n + ' 项停止重试标记（手动 ' + c.user + ' · 自动 ' + c.auto + '）', 'ok');
+            // Deliberately no reload: clearing the list changes no card's cached
+            // snapshot, only which badge the next render pass paints. A repaint
+            // is enough, and a reload would throw away a live flap loop.
+            schedule();
+        });
         GM_registerMenuCommand('fav-fix：备份当前收藏夹（封面+信息 → IndexedDB）', function () {
             // Async and long-running; nothing awaits it, so swallow rejections
             // here or an unexpected throw surfaces only as an unhandled
@@ -5566,6 +6108,11 @@
     function boot() {
         if (!isFavPage()) { log('not a fav page, idle'); return; }
         log('booting on', location.href);
+        // Build the 停止重试 index before the first patch pass, so the very
+        // first render already knows which cards are switched off. Every
+        // accessor re-checks the guard anyway, so this is an optimization of
+        // ordering, not a correctness dependency.
+        loadNoRetryIndex();
         startObserver();
         schedule();
         // Independent missing-items check from boot — patchOnce only runs
@@ -5717,6 +6264,29 @@
                 });
             }
         },
+        // The 停止重试 list (07a-noretry.js). stop()/resume() go through the
+        // SAME helpers the cover badge and the card menu use, so a console
+        // session cannot produce a state the UI could not have produced.
+        // clearAll() repaints (schedule) instead of reloading — no card's
+        // cached snapshot changed, only which badge belongs on it.
+        noRetry: {
+            list: noRetryList,
+            counts: noRetryCounts,
+            stop: function (avOrBv) {
+                var av = String(avOrBv);
+                if (/^BV/i.test(av)) av = bvToAv(av);
+                stopRetryForAv(av);
+                return noRetryCounts();
+            },
+            resume: function (avOrBv) {
+                var av = String(avOrBv);
+                if (/^BV/i.test(av)) av = bvToAv(av);
+                resumeRetryForAv(av);
+                return noRetryCounts();
+            },
+            clearAll: function () { var c = clearAllNoRetry(); schedule(); return c; }
+        },
+
         // Missing-item recovery (task #15): inspection + manual trigger
         fetchAllAvList: fetchAllAvList,
         fetchFullPhase1Avs: fetchFullPhase1Avs,
@@ -5748,6 +6318,7 @@
                 '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
                 '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
+                '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
                 '__biliFavFix.clearAllItemCache()  nuke all per-item GM storage (backup DB untouched)',
                 '__biliFavFix.clearAuth()          drop access_key',
                 '__biliFavFix.bvToAv(bv) / avToBv(av)'

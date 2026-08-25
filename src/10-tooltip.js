@@ -150,14 +150,29 @@
         // Pending — still being chased by the background android flap loop, or
         // waiting for a future retry after it gave up. There's no good snapshot
         // yet, so render a state-aware explainer (NOT the normal rich layout
-        // with empty fields). _flapBgRunning is read LIVE here — showTip rebuilds
-        // innerHTML on every hover — so the text tracks whether the loop is
-        // currently alive (重试中) or has stopped (待重试), matching the badge.
+        // with empty fields). _flapBgRunning and the 停止重试 list are read LIVE
+        // here — showTip rebuilds innerHTML on every hover, and once a second
+        // while hovering — so the text tracks all three badge states: the loop
+        // is alive (重试中), it gave up (待重试), or the user switched this av
+        // off (已停止重试). The stopped copy is static, which makes the
+        // once-a-second rebuild harmless rather than something to special-case.
         if (real._pending) {
             var pav = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : '');
             var pbv = real.bvid || (pav ? avToBv(pav) : null);
-            var pActive = _flapBgRunning;
-            var pHead = pActive ? '正在找回此视频快照…' : '暂未找回，等待重试';
+            // Third, highest-priority state: the user pressed 停止重试. Read
+            // live from the list (07a-noretry.js), same as the badge — the flap
+            // loop's liveness is irrelevant once the av is switched off.
+            var pStopped = pav ? isNoRetryUser(pav) : false;
+            // Fourth state, and the one the copy below has to distinguish: the
+            // loop gave up on this av and recorded an 'auto' 停止重试 (7 days).
+            // Nothing is chasing it — resolveItems keeps it out of the walk AND
+            // out of the loop's candidate set — so it must neither borrow a
+            // running loop's 重试中 wording nor be told that reloading retries.
+            var pPaused = !pStopped && pav ? isRetrySuppressed(pav) : false;
+            var pActive = !pStopped && !pPaused && _flapBgRunning;
+            var pHead = pStopped ? '已停止重试'
+                      : (pActive ? '正在找回此视频快照…'
+                      : (pPaused ? '暂未找回，自动重试已暂停' : '暂未找回，等待重试'));
 
             // Live status block: only while the loop is actually running AND its
             // progress belongs to THIS folder (the loop nulls _flapProgress on
@@ -183,9 +198,24 @@
                          + '</div>';
             }
 
-            var pBody = pActive
+            var pBody = pStopped
+                ? '此视频的自动重试已由你手动停止，脚本不会再为它请求任何接口。点封面左上角的徽章，或在本卡片右上「···」菜单选「恢复重试」，即可恢复并立即重新抓取一轮。'
+                : (pActive
                 ? 'bilibili 的 android 收藏接口会随机漏掉一部分失效视频，脚本正在后台多次重新采样把它捞回来。找回后本卡片会自动更新封面与标题，无需手动操作。'
-                : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。';
+                : (pPaused
+                // The give-up copy below promises that a reload re-tries. With
+                // an auto record in place that is false: the next resolve skips
+                // the page walk for this av entirely. Say what actually happens.
+                ? '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。为避免每次进入收藏夹都重跑一轮，脚本已暂停对它的自动重试，约一周后自动恢复；期间重新整理本页不会再为它请求接口。如需立刻再试一轮，可在本卡片右上「···」菜单点「立即重试」。'
+                : '后台已多次重新采样仍未取回——可能视频确实已被删除，也可能是 bilibili 接口暂时不返回。重新整理本页会自动再试一轮；也可在本卡片右上「···」菜单点「立即重试」立刻再抓一轮。'));
+            // When the stop was recorded. Only for the manual mode: an auto
+            // record is not the user's decision and has no place in a tooltip
+            // that tells them what they themselves switched off.
+            var pStoppedAt = pStopped ? noRetryUserAt(pav) : null;
+            var pStoppedAtHtml = pStoppedAt
+                ? '<div style="margin-top:4px;color:#8a8a92;font-size:11px">已于 '
+                  + esc(fmtTime(Math.floor(pStoppedAt / 1000))) + ' 停止</div>'
+                : '';
             return '<div style="font-weight:600;font-size:13px;margin-bottom:8px;color:#fff;'
                  + 'line-height:1.35;border-bottom:1px solid rgba(255,255,255,.12);padding-bottom:6px">'
                  + esc(pHead) + '</div>'
@@ -194,8 +224,11 @@
                  + liveHtml
                  + '<div style="margin-top:6px;color:#bdbdc2;font-size:11px;line-height:1.55">'
                  + esc(pBody) + '</div>'
+                 + pStoppedAtHtml
                  + '<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,.08);color:#666;font-size:10px">'
-                 + 'fav-fix · ' + (pActive ? '重试中（后台自动）' : '待重试') + '</div>';
+                 + 'fav-fix · ' + (pStopped ? '已停止重试'
+                                : (pActive ? '重试中（后台自动）'
+                                : (pPaused ? '待重试（自动重试已暂停）' : '待重试'))) + '</div>';
         }
 
         var parts = [];
