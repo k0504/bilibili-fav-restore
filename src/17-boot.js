@@ -81,6 +81,11 @@
             // badge. Should drop to 0 once patchOnce settles; if it stays >0
             // across multiple stats() calls, a hit is leaking past clearLoading.
             var cardsLoading = document.querySelectorAll('[data-fav-fix-loading]').length;
+            // cardsPartial: title patched, cover still chased (markPartial's
+            // amber outline). These cards deliberately carry NO
+            // data-fav-fix-marked so Strategy 1 keeps re-detecting them —
+            // which means invalidDetectedNow legitimately includes them.
+            var cardsPartial = document.querySelectorAll('[data-fav-fix-partial]').length;
             return {
                 version: CORE_VERSION,
                 authMode: getAuth().mode,
@@ -91,6 +96,7 @@
                 invalidDetectedNow: invalidNow,
                 coversPatched: coversPatched,
                 cardsMarked: cardsMarked,
+                cardsPartial: cardsPartial,
                 cardsLoading: cardsLoading,
                 sourceBackoff: sourceFailureGate.snapshot()
             };

@@ -20,7 +20,12 @@
         lines.push('【fav-fix】数据来自收藏时的快照');
         lines.push('────────────');
         lines.push('标题：' + (real.title || '（无）') + tag('title'));
+        // Mirror of the tooltip's cover row (AGENTS.md invariant: the two must
+        // not diverge). Deliberately static — the copied text is a snapshot,
+        // so the live three-way suppression read would be stale by the time
+        // anyone reads the clipboard.
         if (real.cover)                lines.push('封面：（已恢复）' + tag('cover'));
+        else if (real._cover_pending)  lines.push('封面：（后台重试中）');
         if (real.upper)                lines.push('UP 主：' + (real.upper.name || '（无）') + (real.upper.mid ? '  UID ' + real.upper.mid : '') + tag('upper'));
         if (av) lines.push('AV：av' + av);
         if (bv) lines.push('BV：' + bv + tag('bvid'));
@@ -80,17 +85,21 @@
         //   stopped                       → 恢复重试 only. Offering 立即重试 next
         //                                   to it would be two buttons for one
         //                                   decision the user already made.
-        //   _pending                      → 立即重试 (re-arm now) + 停止重试.
-        //   _cover_pending                → 停止重试 only. Those cards are
-        //                                   already patched and carry NO badge
-        //                                   (the cover is being chased quietly
-        //                                   in the background), so the menu is
-        //                                   the single entry point for them.
+        //   _pending / _cover_pending     → 立即重试 (re-arm now) + 停止重试.
+        //                                   Partial cards carry NO badge (the
+        //                                   cover is chased quietly in the
+        //                                   background), so the menu — plus the
+        //                                   amber outline and the tooltip's
+        //                                   封面 row — is their entry point.
+        //                                   kickManualRetry re-derives the
+        //                                   cover-only rule from loadCache, so
+        //                                   a lone partial av is not retired by
+        //                                   the title it already has.
         if (av && stopped) items.push({
             key: 'retry', label: '恢复重试',
             onClick: function () { resumeRetryForAv(av); }
         });
-        else if (av && real._pending) {
+        else if (av && (real._pending || real._cover_pending)) {
             items.push({
                 key: 'retry', label: '立即重试',
                 onClick: function () { kickManualRetry(av); }
@@ -100,10 +109,6 @@
                 onClick: function () { stopRetryForAv(av); }
             });
         }
-        else if (av && real._cover_pending) items.push({
-            key: 'stop-retry', label: '停止重试',
-            onClick: function () { stopRetryForAv(av); }
-        });
         if (av) items.push({
             key: 'cp-av', label: '复制 AV 号',
             successMsg: '已复制 av' + av + ' 至剪贴板',
@@ -141,9 +146,13 @@
         // Hidden on _pending cards: they have no real cached snapshot to clear
         // (just a placeholder stub), so "清缓存并重抓" is a heavier, noisier
         // duplicate of "立即重试" (full-page foreground re-resolve + spinner
-        // re-flash vs. a quiet android re-walk). The two retry-flavored actions
-        // are mutually exclusive by card state: 立即重试 for pending, 清缓存并重抓
-        // for recovered/terminal cards where nuking a possibly-wrong snapshot
+        // re-flash vs. a quiet android re-walk). Hidden on _cover_pending
+        // (partial) cards for the opposite reason: they DO hold a real
+        // title/UP/date snapshot, and clearing it discards data the card is
+        // already displaying just to re-chase an image 立即重试 re-samples
+        // without touching. The retry-flavored actions are mutually exclusive
+        // by card state: 立即重试 for pending/partial, 清缓存并重抓 for
+        // recovered/terminal cards where nuking a possibly-wrong snapshot
         // actually means something. (real is the live loadCache re-read above,
         // so this self-corrects as the card transitions pending↔recovered.)
         // Also hidden while the av is user-stopped: "恢复重试" already IS a
@@ -151,7 +160,7 @@
         // patchOnce), and a second button that clears the cache while every
         // network path stays suppressed would only downgrade a patched card to
         // a bare pending stub.
-        if (av && !real._pending && !stopped) items.push({
+        if (av && !real._pending && !real._cover_pending && !stopped) items.push({
             // Label kept short to avoid wrapping inside bilibili's
             // fixed-width card-menu popper. "清除本条缓存并重新抓取" (11
             // chars) wrapped to two lines and the second line overflowed
@@ -227,6 +236,10 @@
                     liveImg.style.filter = '';
                     liveImg.removeAttribute('data-fav-fix-marked');
                     liveImg.removeAttribute('data-fav-fix-loading');
+                    // Hygiene: the item is hidden for partial cards, but the
+                    // card's state can shift between menu render and click —
+                    // a full reset must not leave the amber partial marker.
+                    liveImg.removeAttribute('data-fav-fix-partial');
                 }
                 // Reset container: revert any title text we wrote
                 // (recovered title or "（视频已删除）"), drop marker attrs.
@@ -252,6 +265,7 @@
                     });
                     liveContainer.removeAttribute('data-fav-fix-marked');
                     liveContainer.removeAttribute('data-fav-fix-loading');
+                    liveContainer.removeAttribute('data-fav-fix-partial');
                     liveContainer.__favFixReal = null;
                 }
 

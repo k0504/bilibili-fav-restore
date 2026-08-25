@@ -369,7 +369,9 @@
     // patched onto the card, only the image missing — nothing but a cover
     // retires them). The caller passes the latter as `coverNeeded`; without that
     // distinction the title they already have would retire them on walk 1 and
-    // the cover would never be chased.
+    // the cover would never be chased. A `_pending` candidate whose walk lands
+    // a TITLE but no cover migrates into the cover-only set mid-run (stamped
+    // `_cover_pending`, saved, kept pending) — same rule, discovered later.
     //
     // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
     // merge and call schedule(). The still-pending cards remain detectable by
@@ -533,6 +535,7 @@
 
                 // Promote any candidate android now covers with usable data.
                 var recovered = [];
+                var titleOnly = [];   // stamped _cover_pending this walk (see below)
                 Array.from(pending).forEach(function (av) {
                     var aItem = pageItems.get('android|' + av);
                     if (!aItem) return;
@@ -546,15 +549,37 @@
                     // Keep trying while the walk has not produced what this av
                     // was enqueued for: a cover for the _cover_pending set, any
                     // usable cover-or-title for everyone else.
-                    if (needCover.has(av) ? !merged._src_cover : merged._degenerate) return;
+                    if (needCover.has(av)) {
+                        if (!merged._src_cover) return;
+                    } else if (merged._degenerate) {
+                        return;
+                    } else if (merged._src_title && !merged._src_cover) {
+                        // Title landed, cover did not. Retiring here would save
+                        // a merge WITHOUT the _cover_pending flag — the card
+                        // would render as fully recovered and nothing would
+                        // ever chase the image again (the resolver's classifier
+                        // runs on ITS merge pass, not on ours). Stamp + save so
+                        // the title repaints now via the fast path, then move
+                        // the av into the cover-only set and KEEP it pending:
+                        // from the next walk on, only a real cover retires it.
+                        // Counts as progress below (the title is a repaint),
+                        // and staying in pending keeps the finally's
+                        // _flapLeftover / _flapLeftoverCover bookkeeping right.
+                        merged._cover_pending = true;
+                        saveCache(av, merged);
+                        needCover.add(av);
+                        titleOnly.push(av);
+                        return;
+                    }
                     saveCache(av, merged);
                     pending.delete(av);
                     recovered.push(av);
                 });
 
-                if (recovered.length) {
+                if (recovered.length || titleOnly.length) {
                     dry = 0; errRun = 0;   // progress → reset cadence to the burst gap and keep sampling fast
                     log('flap-bg walk ' + walk + ': recovered', recovered.length,
+                        '· title-only', titleOnly.length, '(cover still chased)',
                         '→ re-patch;', pending.size, 'left');
                     // Upgrade on-screen cards via the normal fast path.
                     schedule();
@@ -646,7 +671,15 @@
         var sameFolder = (_flapLeftoverMid === mid);
         var cands     = sameFolder ? Array.from(_flapLeftover)      : [];
         var coverOnly = sameFolder ? Array.from(_flapLeftoverCover) : [];
-        if (!cands.length && clickedAv) { cands = [String(clickedAv)]; coverOnly = []; }
+        if (!cands.length && clickedAv) {
+            cands = [String(clickedAv)];
+            // Derive the cover-only classification from the live cache entry:
+            // a lone re-armed `_cover_pending` av dropped into the default set
+            // would be retired on walk 1 by the title it already has, without
+            // ever fetching the cover — the button would silently do nothing.
+            var _kc = loadCache(String(clickedAv));
+            coverOnly = (_kc && _kc._cover_pending) ? [String(clickedAv)] : [];
+        }
         // Honour the user's manual stops only. An 'auto' record is exactly what
         // this button is for overriding — the user is telling us to ignore the
         // loop's give-up and sample once more — but a card the user stopped

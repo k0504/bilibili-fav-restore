@@ -244,6 +244,22 @@
         // card img), so this row exists purely for source attribution.
         if (real.cover && real._src_cover) {
             parts.push(row('封面', '<span style="color:#888;font-size:11px">已恢复</span>', real._src_cover));
+        } else if (real._cover_pending) {
+            // Partial card: the row would otherwise silently vanish and the
+            // rich layout would read as full success. State is read LIVE
+            // (stop list + _flapBgRunning), same pattern as the _pending
+            // branch above, so the copy tracks the loop's life: user-stopped
+            // wins, then auto-suppressed (nothing is chasing it for ~7 days),
+            // then a running loop, then the plain fallback — the loop simply
+            // finished, or there is no loop at all (credential-less local
+            // restore, where the stamp is in-memory only).
+            var cav = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : '');
+            var cStopped = cav ? isNoRetryUser(cav) : false;
+            var cPaused  = !cStopped && cav ? isRetrySuppressed(cav) : false;
+            var cTxt = cStopped ? '暂未找回，已停止重试'
+                     : (cPaused ? '暂未找回，自动重试已暂停'
+                     : (_flapBgRunning ? '仍在后台重试' : '暂未找回'));
+            parts.push(row('封面', '<span style="color:#888;font-size:11px">' + esc(cTxt) + '</span>'));
         }
 
         // UP 主

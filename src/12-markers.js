@@ -62,6 +62,10 @@
         if (!hit || !hit.img) return;
         if (hit.img.getAttribute('data-fav-fix-loading')) return; // dedup
         if (hit.img.getAttribute('data-fav-fix-marked'))  return; // already done
+        // Partial cards (markPartial below) already display a real title; a
+        // TTL-expiry re-resolve must not flash a spinner over content the
+        // user can read while only the cover is still being chased.
+        if (hit.img.getAttribute('data-fav-fix-partial')) return;
 
         ensureLoadingStyles();
         var coverWrap = hit.img.parentElement;
@@ -440,5 +444,47 @@
         // Tooltip + card-menu binding, extracted so the pending branch
         // (applyPatch) can reuse it without the outline/title work above.
         bindCardAffordances(hit, real);
+    }
+
+    // ─── Mark a PARTIALLY patched item (_cover_pending) ─────────────────
+    //   Title recovered and painted, cover still a placeholder while the
+    //   background loop chases the image. Honest visual = amber dashed
+    //   outline, sitting between recovered (solid red) and unrecoverable
+    //   (dashed gray). Deliberately does NOT set data-fav-fix-marked: the
+    //   img keeps its placeholder src, so findInvalidContainers Strategy 1
+    //   (`:not([data-fav-fix-marked])`) keeps re-finding the card every
+    //   pass — and the moment the loop saveCache()s a merge that carries a
+    //   cover, the next patchOnce re-detects it, loadCache returns the
+    //   upgraded merge, and applyPatch's recovered branch paints the cover
+    //   IN PLACE (no virtual-scroll node recreation required). Marking it
+    //   would reopen exactly that repaint gap. Idempotence rides on our own
+    //   data-fav-fix-partial attribute instead, which Strategy 1 ignores.
+    //   No badge on purpose: the cover chase is a quiet background fill,
+    //   not a _pending retry owner (see AGENTS.md gotcha 20).
+    function markPartial(hit, real) {
+        if (hit.img && !hit.img.getAttribute('data-fav-fix-partial')) {
+            hit.img.setAttribute('data-fav-fix-partial', '1');
+            hit.img.style.outline = '3px dashed rgba(230,162,60,.9)';
+            hit.img.style.outlineOffset = '-3px';
+        }
+        // Container too: covers Strategy-2 no-img cards and feeds
+        // stats().cardsPartial, same split as markPatched above.
+        if (hit.container && !hit.container.getAttribute('data-fav-fix-partial')) {
+            hit.container.setAttribute('data-fav-fix-partial', '1');
+        }
+        bindCardAffordances(hit, real);
+    }
+
+    // Undo markPartial. The img guard keeps this from wiping a recovered
+    // card's solid-red outline on repeated passes: only an img that actually
+    // carries the partial attribute has the amber outline to reset.
+    function clearPartial(hit) {
+        if (!hit) return;
+        if (hit.img && hit.img.getAttribute('data-fav-fix-partial')) {
+            hit.img.removeAttribute('data-fav-fix-partial');
+            hit.img.style.outline = '';
+            hit.img.style.outlineOffset = '';
+        }
+        if (hit.container) hit.container.removeAttribute('data-fav-fix-partial');
     }
 

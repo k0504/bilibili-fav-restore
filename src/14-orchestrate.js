@@ -1,4 +1,9 @@
-    // Apply a resolved item to one card. Returns 'patched' | 'unrecoverable'.
+    // Apply a resolved item to one card. Returns one of four outcomes:
+    // 'patched' | 'partial' | 'pending' | 'unrecoverable'. 'partial' is the
+    // _cover_pending shape — real title painted, cover still chased by the
+    // background loop — kept a distinct value so the counting sites never
+    // re-derive the classification themselves (this function is the single
+    // DOM-mutation chokepoint and the one place that knows).
     // Extracted so the fast path (sync cache-hit) and the slow path (async
     // resolver result) share the same DOM-mutation logic — they only differ
     // in *when* applyPatch fires and whether markLoading ran first.
@@ -20,6 +25,9 @@
             // (No-op for fast-path cards that never had loading marked.)
             clearLoading(hit);
             clearPending(hit);
+            // Defensive: a partial→terminal transition must not leave a
+            // dangling amber outline under the gray one markPatched sets.
+            clearPartial(hit);
             markPatched(hit, real);
             return 'unrecoverable';
         }
@@ -35,6 +43,10 @@
             // it), or a static "已停止重试" when the user switched this av off.
             // Clear the first-pass loading overlay so the two don't stack.
             clearLoading(hit);
+            // Defensive: a partial→pending transition (cover-pending merge
+            // degraded back to a bare stub) must not keep the amber outline —
+            // markPending only manages the badge, never the img outline.
+            clearPartial(hit);
             // The stop list is queried LIVE (07a-noretry.js), never through a
             // cache field: the user's press has to show on the very next render
             // pass, and the decision must survive a cache purge that the merge
@@ -59,8 +71,31 @@
             bindCardAffordances(hit, real);
             return 'pending';
         }
-        // Recovered (or android-down degenerate): drop any retry badge first.
+        if (real._cover_pending) {
+            // Title recovered, cover still a placeholder (the background loop
+            // keeps chasing the image — see 08-resolver.js). Paint the title
+            // NOW (it is genuine data), but report the honest 'partial'
+            // outcome instead of full success, and mark via markPartial —
+            // amber dashed outline, NO data-fav-fix-marked — so the card
+            // stays re-detectable and the cover lands in place the moment the
+            // loop saves a merge that carries one (12-markers.js has the full
+            // repaint-gap rationale). Deliberately no patchCover (nothing to
+            // paint) and no badge (quiet background fill, not a retry owner).
+            clearPending(hit);
+            clearPartial(hit);   // defensive; markPartial below re-stamps
+            clearLoading(hit);
+            if (real.title) patchTitle(hit.container, real.title);
+            markPartial(hit, real);
+            return 'partial';
+        }
+        // Recovered (or android-down degenerate): drop any retry badge first,
+        // and the amber partial residue — this is the partial→recovered
+        // upgrade path, and a recovered card keeping a stale
+        // data-fav-fix-partial would double-count in stats().cardsPartial
+        // (detection is safe either way: markPatched sets data-fav-fix-marked,
+        // which excludes the card from Strategy 1).
         clearPending(hit);
+        clearPartial(hit);
         if (real.cover && hit.img) {
             // Defer clearLoading until the new cover actually paints.
             // Without this the overlay vanishes the moment we swap
@@ -124,13 +159,17 @@
     async function restoreLocalOnly(hits) {
         var todo = [];
         var patched = 0;
+        var partial = 0;
         hits.forEach(function (hit) {
             var av = getAvFromHit(hit);
             if (!av || _localOnlyMiss.has(av)) return;
             var c = loadCache(av);
             if (c) {
-                try { if (applyPatch(hit, c) === 'patched') patched++; }
-                catch (e) { warn('local-only fast-path applyPatch threw for av', av, e); }
+                try {
+                    var r = applyPatch(hit, c);
+                    if (r === 'patched') patched++;
+                    else if (r === 'partial') partial++;
+                } catch (e) { warn('local-only fast-path applyPatch threw for av', av, e); }
             } else {
                 todo.push({ hit: hit, av: av });
             }
@@ -150,15 +189,27 @@
                     var real = mergeBySource({ backup: item });
                     if (real._degenerate) { _localOnlyMiss.add(t.av); return; }
                     real._attempted = ['backup'];
-                    try { if (applyPatch(t.hit, real) === 'patched') patched++; }
-                    catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
+                    // A title-only backup record (no cover bytes — 15a's
+                    // supply-side gate withheld the url) must render as an
+                    // honest 'partial', not full success. The resolver's
+                    // classifier never runs on this path (it is androidUp-
+                    // gated), so stamp the merge here. IN MEMORY ONLY: this
+                    // path never saveCache()s — a later logged-in resolve
+                    // must stay free to chase the cover for real.
+                    if (real._src_title && !real._src_cover) real._cover_pending = true;
+                    try {
+                        var r = applyPatch(t.hit, real);
+                        if (r === 'patched') patched++;
+                        else if (r === 'partial') partial++;
+                    } catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
                 });
             }
         } else {
             todo.forEach(function (t) { _localOnlyMiss.add(t.av); });
         }
-        log('no access_key —', patched, 'of', hits.length,
-            'invalid card(s) restored from local data (GM cache + backup);',
+        log('no access_key —', patched, 'restored +', partial,
+            'partial (cover pending) of', hits.length,
+            'invalid card(s) from local data (GM cache + backup);',
             'the rest need a login');
     }
 
@@ -227,6 +278,7 @@
         });
 
         var patched = 0;
+        var partial = 0;
         var unrecoverable = 0;
 
         // Patch cached cards first — no spinner, no await.
@@ -234,6 +286,7 @@
             try {
                 var r = applyPatch(p.hit, p.real);
                 if (r === 'patched') patched++;
+                else if (r === 'partial') partial++;
                 else if (r === 'unrecoverable') unrecoverable++;
             } catch (e) {
                 warn('fast-path applyPatch threw for av', p.av, e);
@@ -272,6 +325,7 @@
                 if (!real) { log('av', av, 'no data from any source'); return; }
                 var r = applyPatch(hit, real);
                 if (r === 'patched') patched++;
+                else if (r === 'partial') partial++;
                 else if (r === 'unrecoverable') unrecoverable++;
             });
         } finally {
@@ -290,8 +344,9 @@
                 }
             });
         }
-        if (patched > 0 || unrecoverable > 0) {
-            log('patched', patched, '/ unrecoverable', unrecoverable,
+        if (patched > 0 || partial > 0 || unrecoverable > 0) {
+            log('patched', patched, '/ partial', partial,
+                '/ unrecoverable', unrecoverable,
                 '/ total', hits.length,
                 '(fast-path', cachedPairs.length, '+ slow-path', todoHits.length + ')');
         }
