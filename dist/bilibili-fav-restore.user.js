@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      0.16.0
+// @version      0.16.1
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.16.0)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 0.16.1)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '0.16.0';
+    var CORE_VERSION = '0.16.1';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -1080,11 +1080,13 @@
         // jijidown answers a cold aid with a "loading" stub first and only
         // serves the real record on a follow-up poll (see its fetchAvs).
         //
-        // (xbeibeix was removed: the whole site now sits behind Cloudflare's
-        // interactive Turnstile challenge, which GM_xmlhttpRequest cannot
-        // solve — every request returned the "Just a moment…" page. The
-        // missing-item banner in 13-missing.js still links xbeibeix.com for
-        // MANUAL clicks, which a real browser CAN clear.)
+        // (A third archive, xbeibeix, used to sit here. It was first dropped
+        // from SOURCES when the site moved behind Cloudflare's interactive
+        // Turnstile — GM_xmlhttpRequest only ever got the "Just a moment…"
+        // page — and kept for a while as a manual link on the missing-item
+        // banner, which a real browser could still clear. The site has since
+        // stopped being maintained, so that link is gone too: every trace of
+        // xbeibeix is out of this codebase. Do not re-add it.)
         //
         // Failure backoff (sourceFailureGate): if a source eats its full
         // per-request timeout (5s) on N consecutive chunks, we mark it
@@ -3989,7 +3991,6 @@
                 +   '<div style="margin-top:4px;display:flex;gap:10px;font-size:11px">'
                 +     '<a href="' + videoUrl + '" target="_blank" rel="noopener" style="color:#00aeec">原视频页</a>'
                 +     '<a href="https://www.biliplus.com/video/av' + av + '/" target="_blank" rel="noopener" style="color:#00aeec">biliplus 快照</a>'
-                +     (bv ? '<a href="https://xbeibeix.com/video/' + bv + '" target="_blank" rel="noopener" style="color:#00aeec">xbeibeix</a>' : '')
                 +     '<a href="https://www.jijidown.com/video/av' + av + '" target="_blank" rel="noopener" style="color:#00aeec">jijidown</a>'
                 +   '</div>'
                 + '</div>';

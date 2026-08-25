@@ -144,11 +144,13 @@
         // jijidown answers a cold aid with a "loading" stub first and only
         // serves the real record on a follow-up poll (see its fetchAvs).
         //
-        // (xbeibeix was removed: the whole site now sits behind Cloudflare's
-        // interactive Turnstile challenge, which GM_xmlhttpRequest cannot
-        // solve — every request returned the "Just a moment…" page. The
-        // missing-item banner in 13-missing.js still links xbeibeix.com for
-        // MANUAL clicks, which a real browser CAN clear.)
+        // (A third archive, xbeibeix, used to sit here. It was first dropped
+        // from SOURCES when the site moved behind Cloudflare's interactive
+        // Turnstile — GM_xmlhttpRequest only ever got the "Just a moment…"
+        // page — and kept for a while as a manual link on the missing-item
+        // banner, which a real browser could still clear. The site has since
+        // stopped being maintained, so that link is gone too: every trace of
+        // xbeibeix is out of this codebase. Do not re-add it.)
         //
         // Failure backoff (sourceFailureGate): if a source eats its full
         // per-request timeout (5s) on N consecutive chunks, we mark it
