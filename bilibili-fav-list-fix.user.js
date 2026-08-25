@@ -4,9 +4,9 @@
 // @name:en      Bilibili Fav List Fix (bootstrap)
 // @namespace    https://github.com/SocialSisterYi/bilibili-API-collect
 // @version      1.0.0
-// @description  开发用 bootstrap — 从本地 HTTP 服务拉取最新核心代码并执行。`@version 1.0.0` 永久锁定，除非 bootstrap 协议本身变更，否则不要 bump（一旦 bump 使用者要重新确认安装）。
-// @description:zh-TW  開發用 bootstrap — 從本機 HTTP 服務拉取最新核心代碼並執行。`@version 1.0.0` 永久鎖定，除非 bootstrap 協議本身變更，否則不要 bump（一旦 bump 使用者要重新確認安裝）。
-// @description:en  Dev bootstrap — fetches latest core logic from local server and runs it. `@version 1.0.0` is permanent; never bump unless the bootstrap protocol itself changes.
+// @description  开发用 bootstrap — 以 @require 直接载入磁盘上的构建产物，无需任何本地服务。`@version 1.0.0` 永久锁定，除非 bootstrap 协议本身变更，否则不要 bump。
+// @description:zh-TW  開發用 bootstrap — 以 @require 直接載入磁碟上的建置產物，無需任何本機服務。`@version 1.0.0` 永久鎖定，除非 bootstrap 協定本身變更，否則不要 bump。
+// @description:en  Dev bootstrap — @requires the built script straight off disk; no local server. `@version 1.0.0` is permanent; never bump unless the bootstrap protocol itself changes.
 // @author       you
 // @match        https://space.bilibili.com/*
 // @match        https://www.bilibili.com/list/*
@@ -22,101 +22,64 @@
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @run-at       document-start
-// @connect      127.0.0.1
-// @connect      localhost
 // @connect      api.bilibili.com
 // @connect      passport.bilibili.com
 // @connect      hdslb.com
 // @connect      biliplus.com
 // @connect      jijidown.com
+// @require      file:///C:/project/bilibili-fav-list-fix/dist/bilibili-fav-restore.user.js
 // @license      MIT
 // ==/UserScript==
 
 /*
- * Two-layer architecture (same idea as dl-manager):
+ * Development stub. Runs the working copy on disk rather than the snapshot the
+ * userscript manager holds, so the cycle is: edit a module under src/, run
+ * `python build.py`, reload the bilibili tab.
  *
- *   1. THIS FILE — installed in Tampermonkey ONCE, version 1.0.0.
- *      Only job: fetch the core JS from the local server and eval it.
- *      NEVER bump @version — bumping forces the user to re-confirm install.
+ * ── Why there is a stub at all ──
+ * Installed ONCE at version 1.0.0 and never bumped: bumping forces the user to
+ * re-confirm the install. All change happens in the required file, which the
+ * manager re-reads on every page load.
  *
- *   2. The core (served at /bilibili-fav-list-fix-core.js) — all the real
- *      logic, assembled from src/*.js by serve.py (see bundle.py). Edit any
- *      src/ module; reload the bilibili tab to pick up changes. No
- *      Tampermonkey re-touch needed.
+ * The require names the BUILT script at dist/, not a part under src/: the parts
+ * are concatenated into one closure (see bundle.py) and cannot be loaded
+ * separately. That is also why `python build.py` is now part of the loop —
+ * under the previous serve.py bootstrap the assembly happened per request.
  *
- * Why: TM rejects http://127.0.0.1 as @updateURL (insecure-origin policy),
- * so an auto-updating userscript pointing at the local server is impossible.
- * Solution: pin the stub at v1.0.0 forever, do all updates server-side.
+ * ── Prerequisites, on chrome://extensions under Tampermonkey's details ──
+ *   - "Allow access to file URLs" must be ON
+ *   - Site access set to "On all sites"; a narrower setting fails file:// reads
  *
- * CSP: bilibili.com allows 'unsafe-eval' (verified — eval('1+1') on
- * space.bilibili.com works), so the core runs in the userscript ISOLATED
- * world via eval() and inherits GM_xmlhttpRequest / GM_getValue / etc.
+ * ── The path below is this machine's ──
+ * Anyone else working on the script edits that one line; nothing else here is
+ * local. A require naming a missing file loads NOTHING and reports NOTHING:
+ * the stub still runs, the manager still lists it as active, and the page looks
+ * exactly as though no userscript were installed. Check the path first when the
+ * script appears not to run at all.
  *
- * Trade-off: server down ⇒ userscript inert until it returns. Acceptable —
- * the fix only adds metadata; the page still works without it.
+ * ── The required file's own metadata block is inert ──
+ * dist/bilibili-fav-restore.user.js carries a full ==UserScript== header. When
+ * pulled in through @require it is just a comment: THIS stub's @grant list is
+ * what the code actually runs with, so the two lists have to agree. build.py
+ * parses @match / @grant / @connect out of this file precisely so they cannot
+ * drift (see lint_grants there, which fails the build on a missing grant).
+ *
+ * ── Disable the released script while this one is installed ──
+ * Otherwise both run. The core's __biliFavFixLoaded guard stops the second copy
+ * from doing anything, but which copy wins is then a race.
+ *
+ * ── Known failure mode ──
+ * Userscript managers do not guarantee re-reading a file:// require on every
+ * page load; a stale copy has been observed on this workflow's sibling project.
+ * The version is printed at boot ("core X.Y.Z ready" in the console) and shown
+ * in the FAB menu header — check it before concluding that an edit did not take
+ * effect. serve.py is kept in the repository as a fallback: it cache-busts in
+ * three layers and is deterministic about serving the current bytes.
  */
 
-(function () {
-    'use strict';
-
-    var SERVER_BASE = 'http://127.0.0.1:8766';
-    var CORE_PATH = '/bilibili-fav-list-fix-core.js';
-
-    function showError(msg) {
-        try {
-            var paint = function () {
-                var el = document.createElement('div');
-                el.textContent = 'fav-fix: ' + msg;
-                el.style.cssText = [
-                    'position:fixed', 'right:12px', 'bottom:12px', 'z-index:2147483647',
-                    'padding:6px 10px', 'border-radius:14px',
-                    'font:600 12px/1.2 -apple-system,Segoe UI,sans-serif',
-                    'color:#fff', 'background:#c0392b',
-                    'box-shadow:0 2px 6px rgba(0,0,0,.25)',
-                    'pointer-events:none', 'user-select:none'
-                ].join(';');
-                document.body.appendChild(el);
-                setTimeout(function () { el.remove(); }, 8000);
-            };
-            if (document.body) paint();
-            else document.addEventListener('DOMContentLoaded', paint, { once: true });
-        } catch (e) { /* ignore */ }
-    }
-
-    try {
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: SERVER_BASE + CORE_PATH + '?t=' + Date.now(),
-            timeout: 5000,
-            headers: { 'Cache-Control': 'no-cache' },
-            onload: function (resp) {
-                if (resp.status < 200 || resp.status >= 300) {
-                    console.warn('[fav-fix/bootstrap] core fetch HTTP', resp.status);
-                    showError('core HTTP ' + resp.status);
-                    return;
-                }
-                try {
-                    // eval keeps the core in the userscript ISOLATED world so
-                    // it inherits GM_xmlhttpRequest / GM_getValue / etc.
-                    eval(resp.responseText);
-                    console.log('[fav-fix/bootstrap] core loaded ('
-                                + resp.responseText.length + ' bytes)');
-                } catch (e) {
-                    console.error('[fav-fix/bootstrap] core eval failed', e);
-                    showError('core eval failed: ' + e.message);
-                }
-            },
-            onerror: function () {
-                console.warn('[fav-fix/bootstrap] server unreachable at', SERVER_BASE);
-                showError('server offline — run `python serve.py`');
-            },
-            ontimeout: function () {
-                console.warn('[fav-fix/bootstrap] core fetch timeout');
-                showError('core fetch timeout');
-            }
-        });
-    } catch (e) {
-        console.error('[fav-fix/bootstrap] GM_xmlhttpRequest threw', e);
-        showError('bootstrap error');
-    }
-})();
+/*
+ * Nothing below. The @require above IS the payload: it is fetched and executed
+ * before this file's own body, so an empty body is the whole design. Do not add
+ * loader logic here — that was the previous (HTTP) bootstrap, and having both
+ * would run the core twice.
+ */

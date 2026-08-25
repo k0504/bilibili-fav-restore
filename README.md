@@ -246,23 +246,41 @@ bilibili 的 Android 端收藏接口并不稳定，同一收藏夹的失效条�
 | 文件 | 用途 |
 | ---- | ---- |
 | `dist/bilibili-fav-restore.user.js` | 端用户安装文件。由 `build.py` 从核心代码生成，提交后通过 GitHub raw URL 对外分发。 |
-| `bilibili-fav-list-fix.user.js` | 开发用 bootstrap，`@version` 永久锁定为 `1.0.0`。仅负责从本地 HTTP 服务拉取核心代码并执行，避免每次修改核心都需重新安装 Tampermonkey。 |
+| `bilibili-fav-list-fix.user.js` | 开发用 bootstrap，`@version` 永久锁定为 `1.0.0`。自身不含任何逻辑，仅以 `@require file://` 载入磁盘上的 `dist/bilibili-fav-restore.user.js`，使修改核心后无需重新安装 Tampermonkey。 |
 | `src/*.js` | 核心代码，按关注点拆分为多个模块（签名、DOM 替换、菜单注入、登录流程、静默丢弃检测等）。两套入口共享同一份核心。各模块职责详见 `AGENTS.md` 的「src/ 模块地图」。 |
 | `bundle.py` | 核心代码组装的单一来源。`MANIFEST` 定义模块加载顺序，将 `src/*.js` 拼接还原为单一 IIFE；`serve.py` 与 `build.py` 共享此函数，保证开发与发布产物一致。 |
-| `serve.py` | 本地 HTTP 服务（默认 `127.0.0.1:8766`）。响应 bootstrap 请求时即时调用 `bundle.py` 组装核心代码（磁盘上无单文件核心），端用户无需运行。 |
+| `serve.py` | 备用的本地 HTTP 服务（默认 `127.0.0.1:8766`），即时调用 `bundle.py` 组装核心代码并附加三层缓存失效标头。已不属于默认开发路径，仅在 `@require` 载入到过期副本时用于排除该因素。 |
 | `build.py` | 将核心代码（经 `bundle.py` 组装）打包为 `dist/bilibili-fav-restore.user.js`，并自动从中提取 `CORE_VERSION` 写入 `@version`。 |
+
+### 一次性准备
+
+1. 在 `chrome://extensions` 打开 Tampermonkey 的「详细信息」，开启 **允许访问文件网址**，并将网站访问权限设为 **在所有网站上**。权限范围更窄时 `file://` 读取会失败。
+2. 安装 `bilibili-fav-list-fix.user.js`（仅需一次）。该文件的 `@require` 指向本机绝对路径，其他机器需相应修改该行。
+3. 若同时安装了 `dist/` 的发布版本，请将其停用，否则两份核心会同时载入。
 
 ### 开发循环
 
+编辑 `src/` 下的任一模块后：
+
 ```bash
-python serve.py
-# 浏览器地址栏访问 http://127.0.0.1:8766/bilibili-fav-list-fix.user.js
-# Tampermonkey 弹出安装对话框，确认安装 bootstrap（仅需一次）
+python build.py
 ```
 
-随后编辑 `src/` 下的任一模块，刷新任意收藏夹页面即可生效（`serve.py` 每次请求都会重新组装核心代码，无需构建步骤）。bootstrap 每次都会附加 cache-bust 参数，无需手动清除缓存。
+随后刷新任意收藏夹页面即可生效。`@require` 载入的是构建产物而非 `src/` 中的单个模块——各模块共享同一个闭包（见 `bundle.py`），无法单独载入，因此构建步骤不可省略。
 
-新增 `src/` 模块时须同步在 `bundle.py` 的 `MANIFEST` 中登记，并重启 `serve.py`：该模块在导入时读取 `MANIFEST`，运行中的进程不会感知新增条目。
+新增 `src/` 模块时须同步在 `bundle.py` 的 `MANIFEST` 中登记，否则 `check_manifest()` 会中断构建。
+
+开发期间 `dist/` 会随每次构建变动。发布前请确认其内容与预期一致：该文件同时是对外分发的产物，提交未完成的中间状态会直接影响端用户。
+
+### 载入到过期副本时
+
+Tampermonkey 不保证在每次页面载入时重新读取 `file://` 依赖。判断当前实际运行的版本有两处：浏览器控制台启动时输出的 `core X.Y.Z ready`，以及悬浮按钮菜单标题栏右侧的版本号。若确认为过期副本，可改用备用路径排除该因素：
+
+```bash
+python serve.py
+```
+
+并将 bootstrap 的 `@require` 一行替换为原先的 HTTP 拉取逻辑（见该文件注释）。该路径以三层缓存失效标头保证取得当前字节。
 
 ### 发布
 
