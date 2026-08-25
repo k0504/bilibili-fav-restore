@@ -107,3 +107,21 @@
         return out;
     }
 
+    // Shared promotion predicate: is this merged record a CONFIDENT full
+    // recovery — one whose cover AND title are real, settled data? Used by
+    // the backup walker's merged-fallback gate (15a buildBackupRecord) and by
+    // the recovery-time promotion pipeline (15e-promote.js), so the two can
+    // never drift apart on what "confident" means. The _degenerate / _pending
+    // / _cover_pending exclusions are implied by requiring both _src_* fields
+    // (mergeBySource only sets those when QUALITY passed), and the QUALITY
+    // re-checks are likewise redundant — stated anyway as belt-and-braces,
+    // because a record passing this gate may be written into the backup store
+    // where a bad value would be served back as gospel forever.
+    function promotionGate(m) {
+        return !!m
+            && !m._degenerate && !m._pending && !m._cover_pending
+            && !!m._src_cover && !!m._src_title
+            && QUALITY.cover(m.cover) >= 5
+            && QUALITY.title(m.title) >= 10;
+    }
+

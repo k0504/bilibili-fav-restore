@@ -450,8 +450,19 @@
             var r = slice[i];
             var row = document.createElement('div');
             row.className = 'fav-fix-mgr-row';
-            var tagCls = r.data_source === 'merged' ? ' fav-fix-mgr-tag-merged' : '';
-            var tagTxt = r.data_source === 'merged' ? '取自还原缓存' : '备份时有效';
+            // Four provenance tags, one CSS class: 'merged' (walker fallback
+            // from the rescue cache), 'restored' (auto-promoted full
+            // recovery, 15e), 'restored_meta' (auto-promoted title-only —
+            // coverless on purpose, its image is still being chased).
+            // 'live' / absent = captured while the video was alive.
+            var isAutoRec = r.data_source === 'merged'
+                         || r.data_source === 'restored'
+                         || r.data_source === 'restored_meta';
+            var tagCls = isAutoRec ? ' fav-fix-mgr-tag-merged' : '';
+            var tagTxt = r.data_source === 'merged'        ? '取自还原缓存'
+                       : r.data_source === 'restored'      ? '自动还原'
+                       : r.data_source === 'restored_meta' ? '自动还原·无封面'
+                       : '备份时有效';
             // The visible date follows the active sort key, labeled so a list
             // sorted by 收藏时间 does not show seemingly shuffled backup dates.
             var dateStr = s.sort.indexOf('backed') === 0

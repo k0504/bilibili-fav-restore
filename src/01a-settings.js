@@ -154,6 +154,9 @@
         { key: 'backupProgressEvery', group: 'backup', type: 'int', def: 3, min: 1, max: 50, unit: '页',
           label: '备份进度提示间隔',
           desc: '每走访这么多页弹出一次进度提示。第一页始终提示。' },
+        { key: 'autoPromoteRestored', group: 'backup', type: 'bool', def: true,
+          label: '自动保存还原结果到备份',
+          desc: '确认还原的信息与封面会自动转存到本地备份，不受缓存有效期影响，并计入备份管理与导出。' },
 
         // ── 界面与调试 ──
         { key: 'mgrPageSize', group: 'ui', type: 'int', def: 20, min: 5, max: 100, unit: '条',

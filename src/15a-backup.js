@@ -175,6 +175,36 @@
         return undefined;
     }
 
+    // Cover-quad carry-forward, extracted from buildBackupRecord so the
+    // promotion pipeline (15e-promote.js) applies the IDENTICAL rule instead
+    // of a drifting copy — this is the invariant most likely to lose the only
+    // copy of an image if two implementations diverge. Given the stored
+    // record (or null) and this run's fresh cover URL ('' when none):
+    //   keptBlob  — the archived bytes, carried into the new record verbatim.
+    //   storedUrl — cover_url travels WITH the bytes it describes: while an
+    //               old blob is kept the stored URL stays the old one, so the
+    //               next run still sees url != fresh and re-queues the image.
+    //   reuse     — bytes already match the fresh URL; nothing to download.
+    //   fetchUrl  — the URL to download this time, or null.
+    function backupCoverCarryForward(existing, freshCoverUrl) {
+        var keptBlob  = (existing && existing.cover_blob) || null;
+        var storedUrl = keptBlob ? existing.cover_url
+                                 : (freshCoverUrl || (existing && existing.cover_url) || null);
+        var reuse    = !!(keptBlob && existing.cover_url === freshCoverUrl);
+        var fetchUrl = (!reuse && freshCoverUrl) ? freshCoverUrl : null;
+        return { keptBlob: keptBlob, storedUrl: storedUrl, reuse: reuse, fetchUrl: fetchUrl };
+    }
+
+    // media_ids union, extracted for the same no-second-copy reason: an
+    // upsert must never shrink folder membership. mediaId may be null (the
+    // one-shot migration in 15e has no folder in scope) — then the stored
+    // set is carried unchanged.
+    function backupUnionMediaIds(existing, mediaId) {
+        var ids = (existing && Array.isArray(existing.media_ids)) ? existing.media_ids.slice() : [];
+        if (mediaId != null && ids.indexOf(Number(mediaId)) < 0) ids.push(Number(mediaId));
+        return ids;
+    }
+
     var _persistAsked = false;
     function requestPersistentStorageOnce() {
         if (_persistAsked) return;
@@ -205,9 +235,14 @@
             // Already invalid at backup time. Not necessarily a loss: if the
             // rescue path previously recovered this av, the merged snapshot in
             // GM storage is real data worth persisting (GM entries expire;
-            // the backup does not). Anything else is a genuine blank.
+            // the backup does not). But only a CONFIDENT full recovery
+            // qualifies (promotionGate, 06-merge.js): the old OR-test let a
+            // title-only or half-degenerate merge through, and this store is
+            // trusted forever. Title-only recoveries are deliberately NOT
+            // written here — the walker never produces 'restored_meta';
+            // that shape is owned by the recovery-time pipeline (15e).
             var cached = loadCache(av);
-            if (!cached || !(cached._src_cover || cached._src_title)) {
+            if (!cached || !promotionGate(cached)) {
                 stats.skipped_invalid++;
                 return null;
             }
@@ -252,8 +287,7 @@
         // carries fewer fields than the live listing).
         var chain = [primary, fallback, existing];
         var upper = backupPick(chain, 'upper');
-        var mediaIds = (existing && Array.isArray(existing.media_ids)) ? existing.media_ids.slice() : [];
-        if (mediaIds.indexOf(Number(mediaId)) < 0) mediaIds.push(Number(mediaId));
+        var mediaIds = backupUnionMediaIds(existing, mediaId);
 
         // Cover bytes are the one thing in this store with NO upstream to
         // re-fetch from, and idbPut replaces the whole record — so the new
@@ -262,13 +296,10 @@
         // commitBackupRecord). Seeding these four fields with nulls instead
         // would delete a good image every time the item has since died (no
         // cover left to re-derive) or the CDN refuses today's download.
-        // cover_url always travels WITH the bytes it describes: while an old
-        // blob is being kept the stored URL stays the old one, so the next run
-        // still sees url != coverUrl and re-queues the new image — the
-        // self-healing retry survives.
-        var keptBlob  = (existing && existing.cover_blob) || null;
-        var storedUrl = keptBlob ? existing.cover_url
-                                 : (coverUrl || (existing && existing.cover_url) || null);
+        // The full carry-forward rule (incl. "cover_url always travels WITH
+        // the bytes it describes") lives in backupCoverCarryForward above,
+        // shared with the promotion pipeline.
+        var cf = backupCoverCarryForward(existing, coverUrl);
 
         var rec = {
             av:        av,
@@ -285,33 +316,39 @@
             pages:     backupPick(chain, 'pages'),
             page:      backupPick(chain, 'page'),
             link:      backupPick(chain, 'link') || '',
-            cover_url:  storedUrl,
-            cover_blob: keptBlob,
-            cover_type: keptBlob ? (existing.cover_type || null) : null,
-            cover_size: keptBlob ? (existing.cover_size || 0) : 0,
+            cover_url:  cf.storedUrl,
+            cover_blob: cf.keptBlob,
+            cover_type: cf.keptBlob ? (existing.cover_type || null) : null,
+            cover_size: cf.keptBlob ? (existing.cover_size || 0) : 0,
             media_ids:  mediaIds,
             backed_at:  Date.now(),
             data_source: dataSource
         };
 
         // Re-download only when the bytes we hold no longer match the URL we
-        // just saw (or we never got them). A missing blob is retried on every
-        // subsequent run for free — that is the intended self-healing path for
-        // a cover the CDN refused today.
-        var reuse = !!(keptBlob && existing.cover_url === coverUrl);
-        var fetchUrl = (!reuse && coverUrl) ? coverUrl : null;
+        // just saw (or we never got them) — cf.reuse / cf.fetchUrl. A missing
+        // blob is retried on every subsequent run for free — that is the
+        // intended self-healing path for a cover the CDN refused today.
         // Archived image kept without even attempting a replacement, i.e. this
         // run produced no usable cover URL at all (the item died since the last
         // backup). Counted separately so a run that quietly stopped refreshing
         // covers is not reported as a plain 更新.
-        if (keptBlob && !reuse && !fetchUrl) stats.cover_kept++;
+        if (cf.keptBlob && !cf.reuse && !cf.fetchUrl) stats.cover_kept++;
         // metaOnly = an entry that already existed and needs no download, i.e.
         // the "更新" bucket. A brand-new entry counts as "新增" even when it
-        // carries no cover at all (title-only merged records).
-        return { rec: rec, fetchUrl: fetchUrl, keptBlob: !!keptBlob,
-                 metaOnly: !fetchUrl && !!existing };
+        // carries no cover at all.
+        // requireBytes: a 'merged' record (promotionGate-passed rescue merge)
+        // must actually hold cover bytes to be stored — commitBackupRecord
+        // refuses the put when its fetch fails with nothing carried forward.
+        // 'live' keeps the metadata-only self-healing write.
+        return { rec: rec, fetchUrl: cf.fetchUrl, keptBlob: !!cf.keptBlob,
+                 metaOnly: !cf.fetchUrl && !!existing,
+                 requireBytes: dataSource !== 'live' };
     }
 
+    // Resolves to true when the record was actually put, false otherwise —
+    // the walker ignores this; the promotion pipeline (15e) needs it to count
+    // writes and invalidate _localOnlyMiss only when something changed.
     async function commitBackupRecord(task, stats) {
         if (task.fetchUrl) {
             try {
@@ -334,12 +371,27 @@
                 stats.blob_failed++;
                 if (task.keptBlob) stats.cover_kept++;
                 warn('backup: cover fetch failed for av', task.rec.av, e && e.message);
+                if (task.requireBytes && !task.keptBlob) {
+                    // Bytes-required provenance ('merged' / 'restored'): a
+                    // record whose cover fetch failed is not stored. Writing
+                    // it anyway would manufacture exactly the url-without-
+                    // bytes shape the SOURCES.backup supply-side gate exists
+                    // to neutralize. Surfaced via its own counter — this is
+                    // data the user may want to know went uncaptured.
+                    stats.merged_nocover++;
+                    return false;
+                }
             }
+        } else if (task.requireBytes && !task.keptBlob) {
+            // Defensive: a bytes-required task with neither carried bytes nor
+            // a fetchable URL must never write a byte-less record.
+            stats.merged_nocover++;
+            return false;
         }
         if (task.metaOnly) stats.updated++;
         else stats.backed++;
-        try { await idbPut(BACKUP_STORE_ITEMS, task.rec); }
-        catch (e) { warn('backup: idbPut failed for av', task.rec.av, e && e.message); }
+        try { await idbPut(BACKUP_STORE_ITEMS, task.rec); return true; }
+        catch (e) { warn('backup: idbPut failed for av', task.rec.av, e && e.message); return false; }
     }
 
     async function backupPageItems(list, mediaId, stats) {
@@ -380,7 +432,7 @@
         requestPersistentStorageOnce();
         var stats = {
             total_seen: 0, backed: 0, updated: 0, skipped_invalid: 0,
-            blob_failed: 0, cover_kept: 0, read_failed: 0
+            blob_failed: 0, cover_kept: 0, read_failed: 0, merged_nocover: 0
         };
         var aborted = false;
         var folderTitle = null;
@@ -429,6 +481,10 @@
                 // would otherwise hide.
                 if (stats.cover_kept)  summary += ' · 沿用旧封面 ' + stats.cover_kept;
                 if (stats.read_failed) summary += ' · 读取失败 ' + stats.read_failed;
+                // A promotionGate-passed merged record whose cover download
+                // failed with nothing carried forward is NOT stored (see
+                // commitBackupRecord). Say so — silence would read as "backed".
+                if (stats.merged_nocover) summary += ' · 还原封面下载失败未收录 ' + stats.merged_nocover;
                 toast(summary, 'ok');
             }
             return stats;
@@ -440,6 +496,10 @@
             // a page load.
             _localOnlyMiss.clear();
             await writeBackupMeta(mediaId, stats, aborted, pn, folderTitle);
+            // Promotion tasks defer while this walk holds the store (15e);
+            // resume them now instead of waiting for the next recovery to
+            // happen to re-trigger the drain.
+            drainPromoteQueue();
         }
     }
 
@@ -492,11 +552,17 @@
     async function backupStatus() {
         var out = {
             items: 0, coverBytes: 0, withCover: 0,
+            // Provenance tally. 'live' also counts records with NO
+            // data_source at all (v1-era rows predate the field).
+            bySource: { live: 0, merged: 0, restored: 0, restored_meta: 0 },
             quotaUsed: null, quota: null, folder: null
         };
         out.items = await idbCount(BACKUP_STORE_ITEMS);
         await idbCursorEach(BACKUP_STORE_ITEMS, function (rec) {
             if (rec && rec.cover_size) { out.coverBytes += rec.cover_size; out.withCover++; }
+            var dsrc = rec && rec.data_source;
+            if (dsrc === 'merged' || dsrc === 'restored' || dsrc === 'restored_meta') out.bySource[dsrc]++;
+            else out.bySource.live++;
         });
         try {
             if (navigator.storage && navigator.storage.estimate) {

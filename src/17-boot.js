@@ -15,6 +15,16 @@
         // The in-page command surface. Installed before the first patch
         // pass so the button is reachable even if a scan stalls.
         try { installFab(); } catch (e) { warn('fab install failed', e); }
+        // One-shot promotion migration (15e-promote.js) MUST run before
+        // schedule(): its synchronous snapshot reads the v6 `item:av*`
+        // generation raw, and the first resolve after the CACHE_VERSION bump
+        // overwrites those keys with v7 stubs that may lack the recovered
+        // data. The sweep is cheap (sync GM reads); the cover downloads drain
+        // in the background afterwards.
+        if (cfg('autoPromoteRestored') && !GM_getValue(PROMOTE_MIGRATED_FLAG, false)) {
+            try { runPromotionMigration(); }
+            catch (e) { warn('promote: migration failed', e); }
+        }
         startObserver();
         schedule();
         // Independent missing-items check from boot — patchOnce only runs
@@ -177,6 +187,17 @@
                         scope: { folder: '*', folderTitle: null, query: '', sort: 'none' }
                     });
                 });
+            },
+            // Promotion pipeline (15e-promote.js) — the auto-save of confident
+            // recoveries into the store. queued() is the live task backlog;
+            // migrated() reads the one-shot v6-migration flag; migrateNow()
+            // re-runs the migration REGARDLESS of that flag (verification
+            // aid — promoteOne's value-compare makes a re-run write-free when
+            // nothing changed; the autoPromoteRestored setting still gates it).
+            promote: {
+                queued:     function () { return _promoteQueue.length; },
+                migrated:   function () { return GM_getValue(PROMOTE_MIGRATED_FLAG, false); },
+                migrateNow: function () { return runPromotionMigration(true); }
             }
         },
         // The 停止重试 list (07a-noretry.js). stop()/resume() go through the
@@ -248,10 +269,11 @@
                 '__biliFavFix.patchNow()           drop caches and re-scan DOM',
                 '__biliFavFix.forceRefetch(bvOrAv) drop one item cache + re-patch',
                 '__biliFavFix.backup.run()         back up this folder (metadata + covers) to IndexedDB',
-                '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
+                '__biliFavFix.backup.status()      backup size / covers / quota / bySource tally / last run here',
                 '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
                 '__biliFavFix.backup.importFile(f) merge an exported .zip (File/Blob) back into the store',
+                '__biliFavFix.backup.promote       auto-save of recoveries: queued() / migrated() / migrateNow()',
                 '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
                 '__biliFavFix.settings.open()      open the settings panel',
                 '__biliFavFix.settings.get(key)    read one setting; .set(key, v) / .reset(key) write it',

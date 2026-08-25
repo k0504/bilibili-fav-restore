@@ -442,6 +442,8 @@
             // A panel opened mid-run derives its import button from this flag
             // and has nothing else that would repaint it once the run ends.
             mgrImportReleased();
+            // Promotion tasks defer while an import runs (15e); resume them.
+            drainPromoteQueue();
         }
     }
 

@@ -305,6 +305,14 @@
                     rec._pending ? '[pending]' : '');
             }
             saveCache(av, rec);
+            // Recovery-time promotion into the backup store (15e-promote.js).
+            // Deliberately condition-free here: the classifier no-ops for
+            // stubs / degenerate merges / backup-sourced merges, and the
+            // in-store value-compare makes re-promotion free. Covers the
+            // recoveries that land confidently on the FIRST resolve (never
+            // _pending, so the flap loop's hook below would miss them) and
+            // stamps title-only merges as 'restored_meta'.
+            maybePromoteRecovered(av, rec, mediaId);
             result.set(av, rec);
         });
 
@@ -585,11 +593,20 @@
                         // _flapLeftover / _flapLeftoverCover bookkeeping right.
                         merged._cover_pending = true;
                         saveCache(av, merged);
+                        // Title-only recovery → 'restored_meta' in the backup
+                        // store (classifier picks META off the missing
+                        // _src_cover); upgraded in place by the hook below
+                        // when a later walk lands the cover.
+                        maybePromoteRecovered(av, merged, mediaId);
                         needCover.add(av);
                         titleOnly.push(av);
                         return;
                     }
                     saveCache(av, merged);
+                    // Flap-recovered merge → promotion hook (the merge block's
+                    // hook never saw these avs; they were _pending /
+                    // _cover_pending there). FULL or META per the classifier.
+                    maybePromoteRecovered(av, merged, mediaId);
                     pending.delete(av);
                     recovered.push(av);
                 });
