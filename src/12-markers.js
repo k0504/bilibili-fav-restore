@@ -173,18 +173,31 @@
             // clickable, and a status label reads as a status label no matter
             // what it does on hover. The affordance has to be its own object,
             // sitting where the eye already lands.
+            //
+            // Icon-only and circular: a labelled pill covers a third of the
+            // cover art. The wording survives as title + aria-label, so the
+            // meaning is one hover away and screen readers still get it.
             '.fav-fix-retry-action {',
             '  position:absolute; left:50%; top:50%;',
             '  transform:translate(-50%,-50%); z-index:2147483646;',
-            '  padding:8px 18px; border-radius:18px; border:1px solid rgba(255,255,255,.18);',
-            '  font:600 12px/1 -apple-system,Segoe UI,"PingFang SC","Microsoft YaHei",sans-serif;',
-            '  color:#fff; background:rgba(28,28,30,.86); white-space:nowrap;',
+            '  width:52px; height:52px; border-radius:50%;',
+            '  display:flex; align-items:center; justify-content:center;',
+            '  border:1px solid rgba(255,255,255,.18);',
+            '  color:#fff; background:rgba(28,28,30,.86);',
             '  cursor:pointer; pointer-events:auto; user-select:none;',
             '  box-shadow:0 2px 10px rgba(0,0,0,.35);',
-            '  transition:background .15s, box-shadow .15s;',
+            '  transition:background .15s, box-shadow .15s, transform .12s;',
             '}',
+            '.fav-fix-retry-action svg { width:36px; height:36px; display:block; fill:currentColor; }',
             '.fav-fix-retry-action > * { pointer-events:none; }',
-            '.fav-fix-retry-action:hover { background:rgba(192,57,43,.92); box-shadow:0 3px 14px rgba(0,0,0,.45); }',
+            // Every transform here MUST re-state translate(-50%,-50%): the
+            // centring lives in the same property, so a bare scale() would
+            // snap the button to the cover's bottom-right quadrant on hover.
+            '.fav-fix-retry-action:hover {',
+            '  background:rgba(192,57,43,.92); box-shadow:0 3px 14px rgba(0,0,0,.45);',
+            '  transform:translate(-50%,-50%) scale(1.08);',
+            '}',
+            '.fav-fix-retry-action:active { transform:translate(-50%,-50%) scale(.94); }',
             '.fav-fix-retry-action.resume:hover { background:rgba(52,120,190,.92); }'
         ].join('\n');
         (document.head || document.documentElement).appendChild(st);
@@ -196,11 +209,20 @@
         waiting: '待重试',
         stopped: '已停止重试'
     };
-    // Button label per state. Names the ACTION, never the state.
+    // Button wording per state. Names the ACTION, never the state. No longer
+    // rendered as visible text — it is the button's title and accessible name.
     var RETRY_ACTION_TEXT = {
         active:  '停止重试',
         waiting: '停止重试',
         stopped: '恢复重试'
+    };
+    // Button glyph per state. A stop square and a refresh arrow, deliberately
+    // NOT a pause/play pair: a play triangle centred on a video cover reads as
+    // "play this video", which is exactly the wrong thing to suggest here.
+    var RETRY_ACTION_ICON = {
+        active:  '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>',
+        waiting: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>',
+        stopped: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>'
     };
 
     // Write a state onto an existing badge. Early-returns when the state is
@@ -224,7 +246,9 @@
         btn.classList.toggle('resume', state === 'stopped');
         if (btn.getAttribute('data-fav-fix-retry-state') === state) return;
         btn.setAttribute('data-fav-fix-retry-state', state);
-        btn.textContent = RETRY_ACTION_TEXT[state];
+        btn.innerHTML = RETRY_ACTION_ICON[state];
+        btn.title = RETRY_ACTION_TEXT[state];
+        btn.setAttribute('aria-label', RETRY_ACTION_TEXT[state]);
     }
 
     // The two user-facing transitions, defined once so the cover button, the
