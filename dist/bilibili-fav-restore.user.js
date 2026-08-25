@@ -3,7 +3,7 @@
 // @name:zh-TW   Bilibili 收藏夾失效影片資訊還原
 // @name:en      Bilibili Fav Restore
 // @namespace    https://github.com/k0504/bilibili-fav-restore
-// @version      1.0.0
+// @version      1.1.0
 // @description  在 bilibili 网页版收藏夹页面，自动还原失效（已删除 / UP 自删）视频的原始封面、标题与 metadata。
 // @description:zh-TW  在 bilibili 網頁版收藏夾頁面，自動還原失效（已刪除 / UP 自刪）影片的原始封面、標題與 metadata。
 // @description:en  Restore original cover/title/metadata of invalid (deleted) videos on bilibili web favorites pages.
@@ -36,7 +36,7 @@
 
 /*
  * AUTO-GENERATED — do not edit by hand.
- * Source: src/*.js assembled by bundle.py (CORE_VERSION = 1.0.0)
+ * Source: src/*.js assembled by bundle.py (CORE_VERSION = 1.1.0)
  * @match/@grant/@connect parsed from bilibili-fav-list-fix.user.js.
  * Regenerate with: python build.py
  *
@@ -81,7 +81,7 @@
     // Bump on every meaningful change so `__biliFavFix.VERSION` in DevTools
     // is a reliable "is this the version I just edited?" check. Same idea
     // as dl-manager's CORE_VERSION — see userscripts/bilibili/src/main.js.
-    var CORE_VERSION = '1.0.0';
+    var CORE_VERSION = '1.1.0';
 
     // Pick the page-world window so `__biliFavFix` is reachable from
     // DevTools F12 console (which evaluates in page world). Without
@@ -362,6 +362,9 @@
         { key: 'backupProgressEvery', group: 'backup', type: 'int', def: 3, min: 1, max: 50, unit: '页',
           label: '备份进度提示间隔',
           desc: '每走访这么多页弹出一次进度提示。第一页始终提示。' },
+        { key: 'autoPromoteRestored', group: 'backup', type: 'bool', def: true,
+          label: '自动保存还原结果到备份',
+          desc: '确认还原的信息与封面会自动转存到本地备份，不受缓存有效期影响，并计入备份管理与导出。' },
 
         // ── 界面与调试 ──
         { key: 'mgrPageSize', group: 'ui', type: 'int', def: 20, min: 5, max: 100, unit: '条',
@@ -1362,6 +1365,24 @@
         return out;
     }
 
+    // Shared promotion predicate: is this merged record a CONFIDENT full
+    // recovery — one whose cover AND title are real, settled data? Used by
+    // the backup walker's merged-fallback gate (15a buildBackupRecord) and by
+    // the recovery-time promotion pipeline (15e-promote.js), so the two can
+    // never drift apart on what "confident" means. The _degenerate / _pending
+    // / _cover_pending exclusions are implied by requiring both _src_* fields
+    // (mergeBySource only sets those when QUALITY passed), and the QUALITY
+    // re-checks are likewise redundant — stated anyway as belt-and-braces,
+    // because a record passing this gate may be written into the backup store
+    // where a bad value would be served back as gospel forever.
+    function promotionGate(m) {
+        return !!m
+            && !m._degenerate && !m._pending && !m._cover_pending
+            && !!m._src_cover && !!m._src_title
+            && QUALITY.cover(m.cover) >= 5
+            && QUALITY.title(m.title) >= 10;
+    }
+
     // ─── Persistent per-avid cache ──────────────────────────────────────
     //
     // CACHE_VERSION exists so that adding a new source (or changing merge
@@ -1375,7 +1396,7 @@
     //   - changing the merged-item shape (renaming fields etc.)
 
     var CACHE_PREFIX  = 'item:av';
-    var CACHE_VERSION = 6;   // bumped: +SOURCES.backup (IndexedDB snapshots lead FIELD_PRIORITY)
+    var CACHE_VERSION = 7;   // bumped: SOURCES.backup now offers a cover only when it holds the bytes (byteless records fall to _cover_pending instead of winning the cover slot with a dead url)
     // → cfg('cacheTtlDays'), default 30.
     // Short TTL for NOT-confidently-recovered merges (_degenerate / _pending).
     // This is a STALENESS guard, NOT a retry timer: live retry is owned wholly
@@ -1923,6 +1944,14 @@
                     rec._pending ? '[pending]' : '');
             }
             saveCache(av, rec);
+            // Recovery-time promotion into the backup store (15e-promote.js).
+            // Deliberately condition-free here: the classifier no-ops for
+            // stubs / degenerate merges / backup-sourced merges, and the
+            // in-store value-compare makes re-promotion free. Covers the
+            // recoveries that land confidently on the FIRST resolve (never
+            // _pending, so the flap loop's hook below would miss them) and
+            // stamps title-only merges as 'restored_meta'.
+            maybePromoteRecovered(av, rec, mediaId);
             result.set(av, rec);
         });
 
@@ -1987,7 +2016,9 @@
     // patched onto the card, only the image missing — nothing but a cover
     // retires them). The caller passes the latter as `coverNeeded`; without that
     // distinction the title they already have would retire them on walk 1 and
-    // the cover would never be chased.
+    // the cover would never be chased. A `_pending` candidate whose walk lands
+    // a TITLE but no cover migrates into the cover-only set mid-run (stamped
+    // `_cover_pending`, saved, kept pending) — same rule, discovered later.
     //
     // Re-patch strategy: when a walk recovers an av we saveCache() the upgraded
     // merge and call schedule(). The still-pending cards remain detectable by
@@ -2115,8 +2146,11 @@
 
                 // One fresh android walk straight into pageItems.
                 //   sampledOk — this walk actually holds android's answer about
-                //     the candidates: a page came back, or every candidate
-                //     already has a row so there was nothing left to ask for.
+                //     the candidates: a page came back, or the allFound early
+                //     exit fired because every candidate already has a USABLE
+                //     answer — for a cover-needed av that means a row whose
+                //     cover passes QUALITY, not mere row presence (a stale
+                //     coverless row is not an answer to "where is the cover").
                 //     A walk whose every request threw has neither.
                 //   interrupted — a folder switch truncated the walk. The
                 //     observer's dropAllInMemory() has cleared pageItems out
@@ -2127,8 +2161,23 @@
                 while (pn <= cfg('maxPageWalk')) {
                     if (detectMediaId() !== mediaId) { interrupted = true; break; }
                     if (Date.now() > deadline) break;
+                    // Quality-aware, not presence-only: a cover-needed av
+                    // (the coverNeeded set, incl. mid-run title-only migrants)
+                    // always HAS a stale android row — that row is HOW it got
+                    // its title. A presence test would break here at pn=1 on
+                    // every later walk, so the promotion pass would re-merge
+                    // the same stale rows, no fresh page would ever be
+                    // fetched, and dry would climb to maxDry over ~7
+                    // no-network walks — the cover chase structurally a no-op.
+                    // Counting those avs as satisfied only once their row
+                    // carries a usable cover keeps the walk fetching fresh
+                    // samples, which is the entire point of this loop.
                     var allFound = true;
-                    pending.forEach(function (av) { if (!pageItems.has('android|' + av)) allFound = false; });
+                    pending.forEach(function (av) {
+                        var row = pageItems.get('android|' + av);
+                        if (!row) { allFound = false; return; }
+                        if (needCover.has(av) && QUALITY.cover(row.cover) < 5) allFound = false;
+                    });
                     if (allFound) { sampledOk = true; break; }
                     _flapProgress.page = pn;
                     var page;
@@ -2151,6 +2200,7 @@
 
                 // Promote any candidate android now covers with usable data.
                 var recovered = [];
+                var titleOnly = [];   // stamped _cover_pending this walk (see below)
                 Array.from(pending).forEach(function (av) {
                     var aItem = pageItems.get('android|' + av);
                     if (!aItem) return;
@@ -2164,15 +2214,46 @@
                     // Keep trying while the walk has not produced what this av
                     // was enqueued for: a cover for the _cover_pending set, any
                     // usable cover-or-title for everyone else.
-                    if (needCover.has(av) ? !merged._src_cover : merged._degenerate) return;
+                    if (needCover.has(av)) {
+                        if (!merged._src_cover) return;
+                    } else if (merged._degenerate) {
+                        return;
+                    } else if (merged._src_title && !merged._src_cover) {
+                        // Title landed, cover did not. Retiring here would save
+                        // a merge WITHOUT the _cover_pending flag — the card
+                        // would render as fully recovered and nothing would
+                        // ever chase the image again (the resolver's classifier
+                        // runs on ITS merge pass, not on ours). Stamp + save so
+                        // the title repaints now via the fast path, then move
+                        // the av into the cover-only set and KEEP it pending:
+                        // from the next walk on, only a real cover retires it.
+                        // Counts as progress below (the title is a repaint),
+                        // and staying in pending keeps the finally's
+                        // _flapLeftover / _flapLeftoverCover bookkeeping right.
+                        merged._cover_pending = true;
+                        saveCache(av, merged);
+                        // Title-only recovery → 'restored_meta' in the backup
+                        // store (classifier picks META off the missing
+                        // _src_cover); upgraded in place by the hook below
+                        // when a later walk lands the cover.
+                        maybePromoteRecovered(av, merged, mediaId);
+                        needCover.add(av);
+                        titleOnly.push(av);
+                        return;
+                    }
                     saveCache(av, merged);
+                    // Flap-recovered merge → promotion hook (the merge block's
+                    // hook never saw these avs; they were _pending /
+                    // _cover_pending there). FULL or META per the classifier.
+                    maybePromoteRecovered(av, merged, mediaId);
                     pending.delete(av);
                     recovered.push(av);
                 });
 
-                if (recovered.length) {
+                if (recovered.length || titleOnly.length) {
                     dry = 0; errRun = 0;   // progress → reset cadence to the burst gap and keep sampling fast
                     log('flap-bg walk ' + walk + ': recovered', recovered.length,
+                        '· title-only', titleOnly.length, '(cover still chased)',
                         '→ re-patch;', pending.size, 'left');
                     // Upgrade on-screen cards via the normal fast path.
                     schedule();
@@ -2264,7 +2345,15 @@
         var sameFolder = (_flapLeftoverMid === mid);
         var cands     = sameFolder ? Array.from(_flapLeftover)      : [];
         var coverOnly = sameFolder ? Array.from(_flapLeftoverCover) : [];
-        if (!cands.length && clickedAv) { cands = [String(clickedAv)]; coverOnly = []; }
+        if (!cands.length && clickedAv) {
+            cands = [String(clickedAv)];
+            // Derive the cover-only classification from the live cache entry:
+            // a lone re-armed `_cover_pending` av dropped into the default set
+            // would be retired on walk 1 by the title it already has, without
+            // ever fetching the cover — the button would silently do nothing.
+            var _kc = loadCache(String(clickedAv));
+            coverOnly = (_kc && _kc._cover_pending) ? [String(clickedAv)] : [];
+        }
         // Honour the user's manual stops only. An 'auto' record is exactly what
         // this button is for overriding — the user is telling us to ignore the
         // loop's give-up and sample once more — but a card the user stopped
@@ -2786,6 +2875,22 @@
         // card img), so this row exists purely for source attribution.
         if (real.cover && real._src_cover) {
             parts.push(row('封面', '<span style="color:#888;font-size:11px">已恢复</span>', real._src_cover));
+        } else if (real._cover_pending) {
+            // Partial card: the row would otherwise silently vanish and the
+            // rich layout would read as full success. State is read LIVE
+            // (stop list + _flapBgRunning), same pattern as the _pending
+            // branch above, so the copy tracks the loop's life: user-stopped
+            // wins, then auto-suppressed (nothing is chasing it for ~7 days),
+            // then a running loop, then the plain fallback — the loop simply
+            // finished, or there is no loop at all (credential-less local
+            // restore, where the stamp is in-memory only).
+            var cav = real.oid != null ? String(real.oid) : (real.bvid ? bvToAv(real.bvid) : '');
+            var cStopped = cav ? isNoRetryUser(cav) : false;
+            var cPaused  = !cStopped && cav ? isRetrySuppressed(cav) : false;
+            var cTxt = cStopped ? '暂未找回，已停止重试'
+                     : (cPaused ? '暂未找回，自动重试已暂停'
+                     : (_flapBgRunning ? '仍在后台重试' : '暂未找回'));
+            parts.push(row('封面', '<span style="color:#888;font-size:11px">' + esc(cTxt) + '</span>'));
         }
 
         // UP 主
@@ -2941,7 +3046,12 @@
         lines.push('【fav-fix】数据来自收藏时的快照');
         lines.push('────────────');
         lines.push('标题：' + (real.title || '（无）') + tag('title'));
+        // Mirror of the tooltip's cover row (AGENTS.md invariant: the two must
+        // not diverge). Deliberately static — the copied text is a snapshot,
+        // so the live three-way suppression read would be stale by the time
+        // anyone reads the clipboard.
         if (real.cover)                lines.push('封面：（已恢复）' + tag('cover'));
+        else if (real._cover_pending)  lines.push('封面：（后台重试中）');
         if (real.upper)                lines.push('UP 主：' + (real.upper.name || '（无）') + (real.upper.mid ? '  UID ' + real.upper.mid : '') + tag('upper'));
         if (av) lines.push('AV：av' + av);
         if (bv) lines.push('BV：' + bv + tag('bvid'));
@@ -3001,17 +3111,21 @@
         //   stopped                       → 恢复重试 only. Offering 立即重试 next
         //                                   to it would be two buttons for one
         //                                   decision the user already made.
-        //   _pending                      → 立即重试 (re-arm now) + 停止重试.
-        //   _cover_pending                → 停止重试 only. Those cards are
-        //                                   already patched and carry NO badge
-        //                                   (the cover is being chased quietly
-        //                                   in the background), so the menu is
-        //                                   the single entry point for them.
+        //   _pending / _cover_pending     → 立即重试 (re-arm now) + 停止重试.
+        //                                   Partial cards carry NO badge (the
+        //                                   cover is chased quietly in the
+        //                                   background), so the menu — plus the
+        //                                   amber outline and the tooltip's
+        //                                   封面 row — is their entry point.
+        //                                   kickManualRetry re-derives the
+        //                                   cover-only rule from loadCache, so
+        //                                   a lone partial av is not retired by
+        //                                   the title it already has.
         if (av && stopped) items.push({
             key: 'retry', label: '恢复重试',
             onClick: function () { resumeRetryForAv(av); }
         });
-        else if (av && real._pending) {
+        else if (av && (real._pending || real._cover_pending)) {
             items.push({
                 key: 'retry', label: '立即重试',
                 onClick: function () { kickManualRetry(av); }
@@ -3021,10 +3135,6 @@
                 onClick: function () { stopRetryForAv(av); }
             });
         }
-        else if (av && real._cover_pending) items.push({
-            key: 'stop-retry', label: '停止重试',
-            onClick: function () { stopRetryForAv(av); }
-        });
         if (av) items.push({
             key: 'cp-av', label: '复制 AV 号',
             successMsg: '已复制 av' + av + ' 至剪贴板',
@@ -3062,9 +3172,13 @@
         // Hidden on _pending cards: they have no real cached snapshot to clear
         // (just a placeholder stub), so "清缓存并重抓" is a heavier, noisier
         // duplicate of "立即重试" (full-page foreground re-resolve + spinner
-        // re-flash vs. a quiet android re-walk). The two retry-flavored actions
-        // are mutually exclusive by card state: 立即重试 for pending, 清缓存并重抓
-        // for recovered/terminal cards where nuking a possibly-wrong snapshot
+        // re-flash vs. a quiet android re-walk). Hidden on _cover_pending
+        // (partial) cards for the opposite reason: they DO hold a real
+        // title/UP/date snapshot, and clearing it discards data the card is
+        // already displaying just to re-chase an image 立即重试 re-samples
+        // without touching. The retry-flavored actions are mutually exclusive
+        // by card state: 立即重试 for pending/partial, 清缓存并重抓 for
+        // recovered/terminal cards where nuking a possibly-wrong snapshot
         // actually means something. (real is the live loadCache re-read above,
         // so this self-corrects as the card transitions pending↔recovered.)
         // Also hidden while the av is user-stopped: "恢复重试" already IS a
@@ -3072,7 +3186,7 @@
         // patchOnce), and a second button that clears the cache while every
         // network path stays suppressed would only downgrade a patched card to
         // a bare pending stub.
-        if (av && !real._pending && !stopped) items.push({
+        if (av && !real._pending && !real._cover_pending && !stopped) items.push({
             // Label kept short to avoid wrapping inside bilibili's
             // fixed-width card-menu popper. "清除本条缓存并重新抓取" (11
             // chars) wrapped to two lines and the second line overflowed
@@ -3148,6 +3262,10 @@
                     liveImg.style.filter = '';
                     liveImg.removeAttribute('data-fav-fix-marked');
                     liveImg.removeAttribute('data-fav-fix-loading');
+                    // Hygiene: the item is hidden for partial cards, but the
+                    // card's state can shift between menu render and click —
+                    // a full reset must not leave the amber partial marker.
+                    liveImg.removeAttribute('data-fav-fix-partial');
                 }
                 // Reset container: revert any title text we wrote
                 // (recovered title or "（视频已删除）"), drop marker attrs.
@@ -3173,6 +3291,7 @@
                     });
                     liveContainer.removeAttribute('data-fav-fix-marked');
                     liveContainer.removeAttribute('data-fav-fix-loading');
+                    liveContainer.removeAttribute('data-fav-fix-partial');
                     liveContainer.__favFixReal = null;
                 }
 
@@ -3342,6 +3461,10 @@
         if (!hit || !hit.img) return;
         if (hit.img.getAttribute('data-fav-fix-loading')) return; // dedup
         if (hit.img.getAttribute('data-fav-fix-marked'))  return; // already done
+        // Partial cards (markPartial below) already display a real title; a
+        // TTL-expiry re-resolve must not flash a spinner over content the
+        // user can read while only the cover is still being chased.
+        if (hit.img.getAttribute('data-fav-fix-partial')) return;
 
         ensureLoadingStyles();
         var coverWrap = hit.img.parentElement;
@@ -3722,6 +3845,48 @@
         bindCardAffordances(hit, real);
     }
 
+    // ─── Mark a PARTIALLY patched item (_cover_pending) ─────────────────
+    //   Title recovered and painted, cover still a placeholder while the
+    //   background loop chases the image. Honest visual = amber dashed
+    //   outline, sitting between recovered (solid red) and unrecoverable
+    //   (dashed gray). Deliberately does NOT set data-fav-fix-marked: the
+    //   img keeps its placeholder src, so findInvalidContainers Strategy 1
+    //   (`:not([data-fav-fix-marked])`) keeps re-finding the card every
+    //   pass — and the moment the loop saveCache()s a merge that carries a
+    //   cover, the next patchOnce re-detects it, loadCache returns the
+    //   upgraded merge, and applyPatch's recovered branch paints the cover
+    //   IN PLACE (no virtual-scroll node recreation required). Marking it
+    //   would reopen exactly that repaint gap. Idempotence rides on our own
+    //   data-fav-fix-partial attribute instead, which Strategy 1 ignores.
+    //   No badge on purpose: the cover chase is a quiet background fill,
+    //   not a _pending retry owner (see AGENTS.md gotcha 20).
+    function markPartial(hit, real) {
+        if (hit.img && !hit.img.getAttribute('data-fav-fix-partial')) {
+            hit.img.setAttribute('data-fav-fix-partial', '1');
+            hit.img.style.outline = '3px dashed rgba(230,162,60,.9)';
+            hit.img.style.outlineOffset = '-3px';
+        }
+        // Container too: covers Strategy-2 no-img cards and feeds
+        // stats().cardsPartial, same split as markPatched above.
+        if (hit.container && !hit.container.getAttribute('data-fav-fix-partial')) {
+            hit.container.setAttribute('data-fav-fix-partial', '1');
+        }
+        bindCardAffordances(hit, real);
+    }
+
+    // Undo markPartial. The img guard keeps this from wiping a recovered
+    // card's solid-red outline on repeated passes: only an img that actually
+    // carries the partial attribute has the amber outline to reset.
+    function clearPartial(hit) {
+        if (!hit) return;
+        if (hit.img && hit.img.getAttribute('data-fav-fix-partial')) {
+            hit.img.removeAttribute('data-fav-fix-partial');
+            hit.img.style.outline = '';
+            hit.img.style.outlineOffset = '';
+        }
+        if (hit.container) hit.container.removeAttribute('data-fav-fix-partial');
+    }
+
     // ─── Missing-item recovery (task #15) ────────────────────────────────
     //
     // bilibili's `/x/v3/fav/resource/list` (web) and `/x/v3/fav/folder/
@@ -3764,10 +3929,12 @@
         _flapLeftover.clear();
         _flapLeftoverCover.clear();
         _flapLeftoverMid = null;
-        // Same reasoning for the credential-less restore path's negative memo
-        // (14-orchestrate.js): it records "no local data for this av", which is
-        // only meaningful for the folder currently on screen.
+        // Same reasoning for the credential-less restore path's two memos
+        // (14-orchestrate.js): the negative one records "no local data for
+        // this av", the positive one caches the served merge — both are only
+        // meaningful for the folder currently on screen.
         _localOnlyMiss.clear();
+        _localOnlyHits.clear();
     }
 
     async function fetchAllAvList(mediaId) {
@@ -4091,7 +4258,12 @@
         return p;
     }
 
-    // Apply a resolved item to one card. Returns 'patched' | 'unrecoverable'.
+    // Apply a resolved item to one card. Returns one of four outcomes:
+    // 'patched' | 'partial' | 'pending' | 'unrecoverable'. 'partial' is the
+    // _cover_pending shape — real title painted, cover still chased by the
+    // background loop — kept a distinct value so the counting sites never
+    // re-derive the classification themselves (this function is the single
+    // DOM-mutation chokepoint and the one place that knows).
     // Extracted so the fast path (sync cache-hit) and the slow path (async
     // resolver result) share the same DOM-mutation logic — they only differ
     // in *when* applyPatch fires and whether markLoading ran first.
@@ -4113,6 +4285,9 @@
             // (No-op for fast-path cards that never had loading marked.)
             clearLoading(hit);
             clearPending(hit);
+            // Defensive: a partial→terminal transition must not leave a
+            // dangling amber outline under the gray one markPatched sets.
+            clearPartial(hit);
             markPatched(hit, real);
             return 'unrecoverable';
         }
@@ -4128,6 +4303,10 @@
             // it), or a static "已停止重试" when the user switched this av off.
             // Clear the first-pass loading overlay so the two don't stack.
             clearLoading(hit);
+            // Defensive: a partial→pending transition (cover-pending merge
+            // degraded back to a bare stub) must not keep the amber outline —
+            // markPending only manages the badge, never the img outline.
+            clearPartial(hit);
             // The stop list is queried LIVE (07a-noretry.js), never through a
             // cache field: the user's press has to show on the very next render
             // pass, and the decision must survive a cache purge that the merge
@@ -4152,8 +4331,31 @@
             bindCardAffordances(hit, real);
             return 'pending';
         }
-        // Recovered (or android-down degenerate): drop any retry badge first.
+        if (real._cover_pending) {
+            // Title recovered, cover still a placeholder (the background loop
+            // keeps chasing the image — see 08-resolver.js). Paint the title
+            // NOW (it is genuine data), but report the honest 'partial'
+            // outcome instead of full success, and mark via markPartial —
+            // amber dashed outline, NO data-fav-fix-marked — so the card
+            // stays re-detectable and the cover lands in place the moment the
+            // loop saves a merge that carries one (12-markers.js has the full
+            // repaint-gap rationale). Deliberately no patchCover (nothing to
+            // paint) and no badge (quiet background fill, not a retry owner).
+            clearPending(hit);
+            clearPartial(hit);   // defensive; markPartial below re-stamps
+            clearLoading(hit);
+            if (real.title) patchTitle(hit.container, real.title);
+            markPartial(hit, real);
+            return 'partial';
+        }
+        // Recovered (or android-down degenerate): drop any retry badge first,
+        // and the amber partial residue — this is the partial→recovered
+        // upgrade path, and a recovered card keeping a stale
+        // data-fav-fix-partial would double-count in stats().cardsPartial
+        // (detection is safe either way: markPatched sets data-fav-fix-marked,
+        // which excludes the card from Strategy 1).
         clearPending(hit);
+        clearPartial(hit);
         if (real.cover && hit.img) {
             // Defer clearLoading until the new cover actually paints.
             // Without this the overlay vanishes the moment we swap
@@ -4203,6 +4405,16 @@
     // does a backup run, which is the one thing that can turn a miss into a hit
     // without a page load.
     var _localOnlyMiss = new Set();
+    // …and the HIT twin: av → the backup-served merge applyPatch accepted.
+    // Needed because this path never saveCache()s (red line) while partial
+    // cards deliberately stay re-detectable (markPartial omits
+    // data-fav-fix-marked) — so a logged-out folder full of title-only backup
+    // records would otherwise re-open an IDB transaction per card on EVERY
+    // observer tick, the exact thrash _localOnlyMiss exists to prevent, just
+    // through the hit door. Cleared wherever _localOnlyMiss is cleared (folder
+    // switch, backup run, import, promotion write). Login makes it moot:
+    // patchOnceInner then takes the resolver path, never this one.
+    var _localOnlyHits = new Map();
 
     // Runs INSTEAD of the resolver when there is no access_key. It must not
     // touch the network (android owns every invalid-item snapshot and is
@@ -4217,13 +4429,17 @@
     async function restoreLocalOnly(hits) {
         var todo = [];
         var patched = 0;
+        var partial = 0;
         hits.forEach(function (hit) {
             var av = getAvFromHit(hit);
             if (!av || _localOnlyMiss.has(av)) return;
-            var c = loadCache(av);
+            var c = loadCache(av) || _localOnlyHits.get(av);
             if (c) {
-                try { if (applyPatch(hit, c) === 'patched') patched++; }
-                catch (e) { warn('local-only fast-path applyPatch threw for av', av, e); }
+                try {
+                    var r = applyPatch(hit, c);
+                    if (r === 'patched') patched++;
+                    else if (r === 'partial') partial++;
+                } catch (e) { warn('local-only fast-path applyPatch threw for av', av, e); }
             } else {
                 todo.push({ hit: hit, av: av });
             }
@@ -4243,15 +4459,31 @@
                     var real = mergeBySource({ backup: item });
                     if (real._degenerate) { _localOnlyMiss.add(t.av); return; }
                     real._attempted = ['backup'];
-                    try { if (applyPatch(t.hit, real) === 'patched') patched++; }
-                    catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
+                    // A title-only backup record (no cover bytes — 15a's
+                    // supply-side gate withheld the url) must render as an
+                    // honest 'partial', not full success. The resolver's
+                    // classifier never runs on this path (it is androidUp-
+                    // gated), so stamp the merge here. IN MEMORY ONLY: this
+                    // path never saveCache()s — a later logged-in resolve
+                    // must stay free to chase the cover for real.
+                    if (real._src_title && !real._src_cover) real._cover_pending = true;
+                    try {
+                        var r = applyPatch(t.hit, real);
+                        if (r === 'patched') patched++;
+                        else if (r === 'partial') partial++;
+                        // Memoise the accepted merge so the next tick serves
+                        // it from memory instead of re-opening an IDB
+                        // transaction (see _localOnlyHits above).
+                        if (r === 'patched' || r === 'partial') _localOnlyHits.set(t.av, real);
+                    } catch (e) { warn('local-only applyPatch threw for av', t.av, e); }
                 });
             }
         } else {
             todo.forEach(function (t) { _localOnlyMiss.add(t.av); });
         }
-        log('no access_key —', patched, 'of', hits.length,
-            'invalid card(s) restored from local data (GM cache + backup);',
+        log('no access_key —', patched, 'restored +', partial,
+            'partial (cover pending) of', hits.length,
+            'invalid card(s) from local data (GM cache + backup);',
             'the rest need a login');
     }
 
@@ -4320,6 +4552,7 @@
         });
 
         var patched = 0;
+        var partial = 0;
         var unrecoverable = 0;
 
         // Patch cached cards first — no spinner, no await.
@@ -4327,7 +4560,14 @@
             try {
                 var r = applyPatch(p.hit, p.real);
                 if (r === 'patched') patched++;
+                else if (r === 'partial') partial++;
                 else if (r === 'unrecoverable') unrecoverable++;
+                // Folder accretion (15e): a cache-hit av never reaches the
+                // resolver's promotion hooks, so without this its backup
+                // record would keep only the folder it was first promoted in
+                // for the whole cache TTL (panel filter / export grouping
+                // would omit it elsewhere). Memoised + no-op'd internally.
+                if (r === 'patched' || r === 'partial') maybeAccrueFolder(p.av, mediaId);
             } catch (e) {
                 warn('fast-path applyPatch threw for av', p.av, e);
             }
@@ -4365,6 +4605,7 @@
                 if (!real) { log('av', av, 'no data from any source'); return; }
                 var r = applyPatch(hit, real);
                 if (r === 'patched') patched++;
+                else if (r === 'partial') partial++;
                 else if (r === 'unrecoverable') unrecoverable++;
             });
         } finally {
@@ -4383,8 +4624,9 @@
                 }
             });
         }
-        if (patched > 0 || unrecoverable > 0) {
-            log('patched', patched, '/ unrecoverable', unrecoverable,
+        if (patched > 0 || partial > 0 || unrecoverable > 0) {
+            log('patched', patched, '/ partial', partial,
+                '/ unrecoverable', unrecoverable,
                 '/ total', hits.length,
                 '(fast-path', cachedPairs.length, '+ slow-path', todoHits.length + ')');
         }
@@ -4643,6 +4885,36 @@
         return undefined;
     }
 
+    // Cover-quad carry-forward, extracted from buildBackupRecord so the
+    // promotion pipeline (15e-promote.js) applies the IDENTICAL rule instead
+    // of a drifting copy — this is the invariant most likely to lose the only
+    // copy of an image if two implementations diverge. Given the stored
+    // record (or null) and this run's fresh cover URL ('' when none):
+    //   keptBlob  — the archived bytes, carried into the new record verbatim.
+    //   storedUrl — cover_url travels WITH the bytes it describes: while an
+    //               old blob is kept the stored URL stays the old one, so the
+    //               next run still sees url != fresh and re-queues the image.
+    //   reuse     — bytes already match the fresh URL; nothing to download.
+    //   fetchUrl  — the URL to download this time, or null.
+    function backupCoverCarryForward(existing, freshCoverUrl) {
+        var keptBlob  = (existing && existing.cover_blob) || null;
+        var storedUrl = keptBlob ? existing.cover_url
+                                 : (freshCoverUrl || (existing && existing.cover_url) || null);
+        var reuse    = !!(keptBlob && existing.cover_url === freshCoverUrl);
+        var fetchUrl = (!reuse && freshCoverUrl) ? freshCoverUrl : null;
+        return { keptBlob: keptBlob, storedUrl: storedUrl, reuse: reuse, fetchUrl: fetchUrl };
+    }
+
+    // media_ids union, extracted for the same no-second-copy reason: an
+    // upsert must never shrink folder membership. mediaId may be null (the
+    // one-shot migration in 15e has no folder in scope) — then the stored
+    // set is carried unchanged.
+    function backupUnionMediaIds(existing, mediaId) {
+        var ids = (existing && Array.isArray(existing.media_ids)) ? existing.media_ids.slice() : [];
+        if (mediaId != null && ids.indexOf(Number(mediaId)) < 0) ids.push(Number(mediaId));
+        return ids;
+    }
+
     var _persistAsked = false;
     function requestPersistentStorageOnce() {
         if (_persistAsked) return;
@@ -4673,9 +4945,14 @@
             // Already invalid at backup time. Not necessarily a loss: if the
             // rescue path previously recovered this av, the merged snapshot in
             // GM storage is real data worth persisting (GM entries expire;
-            // the backup does not). Anything else is a genuine blank.
+            // the backup does not). But only a CONFIDENT full recovery
+            // qualifies (promotionGate, 06-merge.js): the old OR-test let a
+            // title-only or half-degenerate merge through, and this store is
+            // trusted forever. Title-only recoveries are deliberately NOT
+            // written here — the walker never produces 'restored_meta';
+            // that shape is owned by the recovery-time pipeline (15e).
             var cached = loadCache(av);
-            if (!cached || !(cached._src_cover || cached._src_title)) {
+            if (!cached || !promotionGate(cached)) {
                 stats.skipped_invalid++;
                 return null;
             }
@@ -4720,8 +4997,7 @@
         // carries fewer fields than the live listing).
         var chain = [primary, fallback, existing];
         var upper = backupPick(chain, 'upper');
-        var mediaIds = (existing && Array.isArray(existing.media_ids)) ? existing.media_ids.slice() : [];
-        if (mediaIds.indexOf(Number(mediaId)) < 0) mediaIds.push(Number(mediaId));
+        var mediaIds = backupUnionMediaIds(existing, mediaId);
 
         // Cover bytes are the one thing in this store with NO upstream to
         // re-fetch from, and idbPut replaces the whole record — so the new
@@ -4730,13 +5006,10 @@
         // commitBackupRecord). Seeding these four fields with nulls instead
         // would delete a good image every time the item has since died (no
         // cover left to re-derive) or the CDN refuses today's download.
-        // cover_url always travels WITH the bytes it describes: while an old
-        // blob is being kept the stored URL stays the old one, so the next run
-        // still sees url != coverUrl and re-queues the new image — the
-        // self-healing retry survives.
-        var keptBlob  = (existing && existing.cover_blob) || null;
-        var storedUrl = keptBlob ? existing.cover_url
-                                 : (coverUrl || (existing && existing.cover_url) || null);
+        // The full carry-forward rule (incl. "cover_url always travels WITH
+        // the bytes it describes") lives in backupCoverCarryForward above,
+        // shared with the promotion pipeline.
+        var cf = backupCoverCarryForward(existing, coverUrl);
 
         var rec = {
             av:        av,
@@ -4753,33 +5026,39 @@
             pages:     backupPick(chain, 'pages'),
             page:      backupPick(chain, 'page'),
             link:      backupPick(chain, 'link') || '',
-            cover_url:  storedUrl,
-            cover_blob: keptBlob,
-            cover_type: keptBlob ? (existing.cover_type || null) : null,
-            cover_size: keptBlob ? (existing.cover_size || 0) : 0,
+            cover_url:  cf.storedUrl,
+            cover_blob: cf.keptBlob,
+            cover_type: cf.keptBlob ? (existing.cover_type || null) : null,
+            cover_size: cf.keptBlob ? (existing.cover_size || 0) : 0,
             media_ids:  mediaIds,
             backed_at:  Date.now(),
             data_source: dataSource
         };
 
         // Re-download only when the bytes we hold no longer match the URL we
-        // just saw (or we never got them). A missing blob is retried on every
-        // subsequent run for free — that is the intended self-healing path for
-        // a cover the CDN refused today.
-        var reuse = !!(keptBlob && existing.cover_url === coverUrl);
-        var fetchUrl = (!reuse && coverUrl) ? coverUrl : null;
+        // just saw (or we never got them) — cf.reuse / cf.fetchUrl. A missing
+        // blob is retried on every subsequent run for free — that is the
+        // intended self-healing path for a cover the CDN refused today.
         // Archived image kept without even attempting a replacement, i.e. this
         // run produced no usable cover URL at all (the item died since the last
         // backup). Counted separately so a run that quietly stopped refreshing
         // covers is not reported as a plain 更新.
-        if (keptBlob && !reuse && !fetchUrl) stats.cover_kept++;
+        if (cf.keptBlob && !cf.reuse && !cf.fetchUrl) stats.cover_kept++;
         // metaOnly = an entry that already existed and needs no download, i.e.
         // the "更新" bucket. A brand-new entry counts as "新增" even when it
-        // carries no cover at all (title-only merged records).
-        return { rec: rec, fetchUrl: fetchUrl, keptBlob: !!keptBlob,
-                 metaOnly: !fetchUrl && !!existing };
+        // carries no cover at all.
+        // requireBytes: a 'merged' record (promotionGate-passed rescue merge)
+        // must actually hold cover bytes to be stored — commitBackupRecord
+        // refuses the put when its fetch fails with nothing carried forward.
+        // 'live' keeps the metadata-only self-healing write.
+        return { rec: rec, fetchUrl: cf.fetchUrl, keptBlob: !!cf.keptBlob,
+                 metaOnly: !cf.fetchUrl && !!existing,
+                 requireBytes: dataSource !== 'live' };
     }
 
+    // Resolves to true when the record was actually put, false otherwise —
+    // the walker ignores this; the promotion pipeline (15e) needs it to count
+    // writes and invalidate _localOnlyMiss only when something changed.
     async function commitBackupRecord(task, stats) {
         if (task.fetchUrl) {
             try {
@@ -4793,6 +5072,19 @@
                 task.rec.cover_type = blob.type || null;
                 task.rec.cover_size = blob.size || 0;
             } catch (e) {
+                warn('backup: cover fetch failed for av', task.rec.av, e && e.message);
+                if (task.requireBytes && !task.keptBlob) {
+                    // Bytes-required provenance ('merged' / 'restored'): a
+                    // record whose cover fetch failed is not stored. Writing
+                    // it anyway would manufacture exactly the url-without-
+                    // bytes shape the SOURCES.backup supply-side gate exists
+                    // to neutralize. Counted ONLY in merged_nocover — not
+                    // also blob_failed — so the toast's 封面失败 and
+                    // 还原封面下载失败未收录 lines are disjoint sets rather
+                    // than the latter double-surfacing a subset of the former.
+                    stats.merged_nocover++;
+                    return false;
+                }
                 // Leave the carried-forward fields alone. Deleting the only
                 // copy of an already-archived cover because today's download
                 // failed is unrecoverable; the record keeps the OLD url+bytes,
@@ -4801,13 +5093,23 @@
                 // stays null and the URL is retried on the next run.
                 stats.blob_failed++;
                 if (task.keptBlob) stats.cover_kept++;
-                warn('backup: cover fetch failed for av', task.rec.av, e && e.message);
             }
+        } else if (task.requireBytes && !task.keptBlob) {
+            // Defensive: a bytes-required task with neither carried bytes nor
+            // a fetchable URL must never write a byte-less record.
+            stats.merged_nocover++;
+            return false;
         }
+        // Last gate before the put: a panel delete raced this write and the
+        // user's delete wins (15e promoteCancelAv). Deliberately checked HERE,
+        // after the cover fetch — that await is the seconds-wide window the
+        // race lives in. Walker tasks carry no stillValid (the panel is
+        // locked against deletes while a walk runs).
+        if (task.stillValid && !task.stillValid()) return false;
         if (task.metaOnly) stats.updated++;
         else stats.backed++;
-        try { await idbPut(BACKUP_STORE_ITEMS, task.rec); }
-        catch (e) { warn('backup: idbPut failed for av', task.rec.av, e && e.message); }
+        try { await idbPut(BACKUP_STORE_ITEMS, task.rec); return true; }
+        catch (e) { warn('backup: idbPut failed for av', task.rec.av, e && e.message); return false; }
     }
 
     async function backupPageItems(list, mediaId, stats) {
@@ -4846,9 +5148,14 @@
 
         _backupRunning = true;
         requestPersistentStorageOnce();
+        // The flag above stops the promotion drain from dispatching anything
+        // NEW; this wait lets the ≤ backupBlobConcurrency already-running
+        // tasks finish, so none of them can resume after this walk wrote the
+        // same av and clobber the newer record with a pre-walk snapshot.
+        await promoteQuiesce();
         var stats = {
             total_seen: 0, backed: 0, updated: 0, skipped_invalid: 0,
-            blob_failed: 0, cover_kept: 0, read_failed: 0
+            blob_failed: 0, cover_kept: 0, read_failed: 0, merged_nocover: 0
         };
         var aborted = false;
         var folderTitle = null;
@@ -4897,6 +5204,10 @@
                 // would otherwise hide.
                 if (stats.cover_kept)  summary += ' · 沿用旧封面 ' + stats.cover_kept;
                 if (stats.read_failed) summary += ' · 读取失败 ' + stats.read_failed;
+                // A promotionGate-passed merged record whose cover download
+                // failed with nothing carried forward is NOT stored (see
+                // commitBackupRecord). Say so — silence would read as "backed".
+                if (stats.merged_nocover) summary += ' · 还原封面下载失败未收录 ' + stats.merged_nocover;
                 toast(summary, 'ok');
             }
             return stats;
@@ -4904,10 +5215,15 @@
             _backupRunning = false;
             // A run just turned "no local data for this av" into "there is
             // now", so the credential-less restore path must re-check
-            // (14-orchestrate.js); nothing else invalidates that memo without
-            // a page load.
+            // (14-orchestrate.js) — and its hit memo may hold merges this
+            // walk's fresher records supersede.
             _localOnlyMiss.clear();
+            _localOnlyHits.clear();
             await writeBackupMeta(mediaId, stats, aborted, pn, folderTitle);
+            // Promotion tasks defer while this walk holds the store (15e);
+            // resume them now instead of waiting for the next recovery to
+            // happen to re-trigger the drain.
+            drainPromoteQueue();
         }
     }
 
@@ -4960,11 +5276,17 @@
     async function backupStatus() {
         var out = {
             items: 0, coverBytes: 0, withCover: 0,
+            // Provenance tally. 'live' also counts records with NO
+            // data_source at all (v1-era rows predate the field).
+            bySource: { live: 0, merged: 0, restored: 0, restored_meta: 0 },
             quotaUsed: null, quota: null, folder: null
         };
         out.items = await idbCount(BACKUP_STORE_ITEMS);
         await idbCursorEach(BACKUP_STORE_ITEMS, function (rec) {
             if (rec && rec.cover_size) { out.coverBytes += rec.cover_size; out.withCover++; }
+            var dsrc = rec && rec.data_source;
+            if (dsrc === 'merged' || dsrc === 'restored' || dsrc === 'restored_meta') out.bySource[dsrc]++;
+            else out.bySource.live++;
         });
         try {
             if (navigator.storage && navigator.storage.estimate) {
@@ -5029,12 +5351,24 @@
                 // Deliberately NOT returned: `attr` and `link`. Those describe
                 // the item's CURRENT state / navigation target, which the live
                 // sources own; a stale backed-up `attr` would tell the UI a
-                // dead video is still valid.
+                // dead video is still valid. `cover` (below) is withheld too
+                // whenever we do not actually hold its bytes.
                 out.set(av, {
                     oid:      Number(av),
                     bvid:     rec.bvid || undefined,
                     title:    rec.title,
-                    cover:    rec.cover_url || undefined,
+                    // Offer a cover ONLY when we hold its bytes. A stored
+                    // cover_url with no cover_blob (an url-only import via
+                    // importUrlOnlyQuad in 15d, or a blob_failed walk in
+                    // commitBackupRecord) is a real bilibili URL that passes
+                    // QUALITY.cover and would win FIELD_PRIORITY.cover (backup
+                    // leads), blocking android/public/biliplus/jijidown — and if
+                    // the URL is dead the card shows a broken image with no blob
+                    // to fall back to. Gating on cover_blob keeps the invariant:
+                    // fetchAvs advertises a cover IFF backupCoverObjectUrl
+                    // (09-dom.js) can serve its bytes. The url still lives in the
+                    // stored record for the self-healing re-download path.
+                    cover:    rec.cover_blob ? (rec.cover_url || undefined) : undefined,
                     intro:    rec.intro || undefined,
                     duration: rec.duration,
                     upper:    rec.upper || undefined,
@@ -5346,11 +5680,16 @@
                   || _backupRunning || _exportRunning || _importRunning);
     }
 
-    // Three-layer delete (see the header invariants). pageCache is NOT cleared
+    // Four-layer delete (see the header invariants). pageCache is NOT cleared
     // here: it is keyed by page, not by av, so the caller drops it once after a
-    // whole batch instead of once per item.
+    // whole batch instead of once per item. The fourth layer is the promotion
+    // pipeline (15e): a queued or in-flight promotion for this av would
+    // otherwise idbPut the record right back after the delete — an in-flight
+    // one can be parked on a cover download for seconds, plenty of time for
+    // the user's delete to land in between.
     function deleteBackupAv(av) {
         av = String(av);
+        promoteCancelAv(av);
         return idbDelete(BACKUP_STORE_ITEMS, av).then(function () {
             try { clearItemCache(av); }
             catch (e) { warn('mgr: clearItemCache failed for av', av, e && e.message); }
@@ -5503,8 +5842,19 @@
             var r = slice[i];
             var row = document.createElement('div');
             row.className = 'fav-fix-mgr-row';
-            var tagCls = r.data_source === 'merged' ? ' fav-fix-mgr-tag-merged' : '';
-            var tagTxt = r.data_source === 'merged' ? '取自还原缓存' : '备份时有效';
+            // Four provenance tags, one CSS class: 'merged' (walker fallback
+            // from the rescue cache), 'restored' (auto-promoted full
+            // recovery, 15e), 'restored_meta' (auto-promoted title-only —
+            // coverless on purpose, its image is still being chased).
+            // 'live' / absent = captured while the video was alive.
+            var isAutoRec = r.data_source === 'merged'
+                         || r.data_source === 'restored'
+                         || r.data_source === 'restored_meta';
+            var tagCls = isAutoRec ? ' fav-fix-mgr-tag-merged' : '';
+            var tagTxt = r.data_source === 'merged'        ? '取自还原缓存'
+                       : r.data_source === 'restored'      ? '自动还原'
+                       : r.data_source === 'restored_meta' ? '自动还原·无封面'
+                       : '备份时有效';
             // The visible date follows the active sort key, labeled so a list
             // sorted by 收藏时间 does not show seemingly shuffled backup dates.
             var dateStr = s.sort.indexOf('backed') === 0
@@ -6451,6 +6801,10 @@
             // A panel opened mid-run derives its export button from this flag
             // and has nothing else that would repaint it once the run ends.
             mgrExportReleased();
+            // Promotion tasks defer while an export runs (15e); resume them.
+            // (No promoteQuiesce on entry, unlike walk/import: export is a
+            // pure reader and its per-record idbGets are atomic.)
+            drainPromoteQueue();
         }
     }
 
@@ -7035,12 +7389,19 @@
         if (_importRunning) { toast('导入进行中，请稍后再试', 'warn'); return null; }
         _importRunning = true;
         try {
+            // The flag stops the promotion drain from dispatching new tasks;
+            // this wait lets the few already-running ones finish so none can
+            // resume mid-import and overwrite a freshly merged record with a
+            // pre-import snapshot (15e promoteQuiesce).
+            await promoteQuiesce();
             return await importBackupFileInner(file, opts);
         } finally {
             _importRunning = false;
             // A panel opened mid-run derives its import button from this flag
             // and has nothing else that would repaint it once the run ends.
             mgrImportReleased();
+            // Promotion tasks defer while an import runs (15e); resume them.
+            drainPromoteQueue();
         }
     }
 
@@ -7238,8 +7599,10 @@
             // The store just turned "no local data for this av" into "there is
             // now", so the credential-less restore path must re-check
             // (14-orchestrate.js) — the same invalidation a backup run does in
-            // its finally. Nothing else clears that memo without a page load.
+            // its finally, hit memo included (it may hold merges the imported
+            // records supersede).
             _localOnlyMiss.clear();
+            _localOnlyHits.clear();
         }
 
         // Appended only when non-zero, and the whole toast drops to warn: each
@@ -7364,6 +7727,463 @@
             });
         });
         input.click();
+    }
+    // ─── Promotion pipeline (recovery → backup store) ───────────────────
+    //
+    // The GM item cache is the wrong resting place for a confident recovery:
+    // it expires (cfg('cacheTtlDays')), it is invisible to the manager panel,
+    // and it is not covered by export/import — while the third-party source
+    // that produced the recovery may already be dead by the time the cache
+    // entry lapses. This module copies recoveries into the IndexedDB backup
+    // store at recovery time, so the store becomes the durable single source
+    // of truth. Two record shapes come out of it:
+    //   data_source 'restored'      — full recovery (cover bytes REQUIRED;
+    //                                 a record whose cover fetch failed is
+    //                                 not stored, never demoted to meta).
+    //   data_source 'restored_meta' — title-only recovery (_src_title, no
+    //                                 _src_cover): an empty cover quad on
+    //                                 purpose. Post-D3 SOURCES.backup serves
+    //                                 no cover for it, so it merges back as
+    //                                 _cover_pending and the flap loop keeps
+    //                                 chasing the image; when one lands, the
+    //                                 FULL path upgrades the same record.
+    //
+    // Hooks: both resolver saveCache sites (08-resolver.js — the merge block
+    // and the flap loop's promotion pass) call maybePromoteRecovered(). The
+    // classifier decides FULL / META / no-op internally; the call sites stay
+    // condition-free. The credential-less restoreLocalOnly path never reaches
+    // either hook (it neither resolves nor runs the loop), so promotion can
+    // never fire without a login — by construction, not by a flag.
+    //
+    // Every 15a store invariant applies unchanged and is REUSED, not copied:
+    // idbGet before put (read failure = skip, never a blind overwrite), the
+    // cover quad as one unit via backupCoverCarryForward, media_ids union via
+    // backupUnionMediaIds, byte-less writes refused via commitBackupRecord's
+    // requireBytes, and the meta store NEVER touched (its records mean "last
+    // complete walk"; a promotion is not a walk).
+    //
+    // Concurrency: promotion neither takes nor blocks the three bulk-op
+    // mutexes — it DEFERS while any of _backupRunning / _importRunning /
+    // _exportRunning is held (their finallys call drainPromoteQueue() to
+    // resume promptly), and bounds its own cover downloads at
+    // cfg('backupBlobConcurrency'). A deferred task is not lost: it sits in
+    // the queue, and even a dropped queue self-heals on the next resolve.
+
+    var _promoteQueue    = [];         // pending tasks {av, merged, mediaId, kind, mig}
+    var _promoteInFlight = new Set();  // avs queued or running — dedup
+    var _promoteActive   = 0;          // promoteOne bodies currently running
+    // Avs whose promotion was cancelled by a panel delete while the task was
+    // already RUNNING (a queued task is simply removed instead). The running
+    // task checks this right before its idbPut — the cover-fetch await is a
+    // seconds-wide window in which the user can delete the very record being
+    // promoted, and the delete must win (see promoteCancelAv).
+    var _promoteCancelled = new Set();
+
+    // Task-kind precedence for the queued-task upgrade in enqueuePromotion:
+    // a FULL promotion supersedes a queued META, and either supersedes a
+    // queued folder-accrual (the reverse never downgrades — a FULL/META
+    // write already unions the folder, so nothing is lost in the upgrade).
+    var PROMOTE_KIND_RANK = { full: 3, meta: 2, accrue: 1 };
+
+    // Folder-accrual memo, keyed `mediaId|av`, session-scoped. A cache-hit
+    // resolve (or a backup-served merge that cheap-skips promotion) fires on
+    // every folder visit; without the memo each debounced tick would re-queue
+    // the same no-op accrual.
+    var _accrued = new Set();
+
+    var PROMOTE_MIGRATED_FLAG = 'promote:migrated:v7';
+
+    // Live migration bookkeeping: null except between runPromotionMigration()
+    // and the settling of its last task, when ONE summary toast fires.
+    // Runtime promotions are silent (log only) — the card is already visibly
+    // recovered; a per-card toast would spam.
+    var _migStats = null;
+
+    // FULL / META / null classifier, shared by the runtime hooks and the
+    // migration. `bypassSkips` (migration only) disables the two runtime
+    // cheap-skips: under CACHE_VERSION 7 semantics a backup-sourced cover
+    // implies bytes in the store and a backup-sourced title implies the store
+    // already owns it, so re-promoting is pointless — but v6 entries carry no
+    // such guarantee, so the migration classifies them all and lets
+    // promoteOne's idbGet + value-compare do the real idempotence work.
+    function promoteClassify(rec, bypassSkips) {
+        if (!rec) return null;
+        if (promotionGate(rec)) {
+            if (!bypassSkips && rec._src_cover === 'backup' && rec._src_title === 'backup') return null;
+            return 'full';
+        }
+        if (rec._src_title && !rec._src_cover) {
+            if (!bypassSkips && rec._src_title === 'backup') return null;
+            return 'meta';
+        }
+        return null;
+    }
+
+    // The single runtime entry point, called after each resolver saveCache.
+    // Fire-and-forget and cheap on the no-op path (two flag reads + the
+    // classifier) — it must never block first paint or the flap loop.
+    function maybePromoteRecovered(av, rec, mediaId) {
+        if (!cfg('autoPromoteRestored')) return;
+        if (typeof indexedDB === 'undefined') return;
+        var kind = promoteClassify(rec, false);
+        if (!kind) {
+            // Not promotable — most commonly a merge served entirely from the
+            // backup store (the cheap-skips above). The record's FOLDER
+            // MEMBERSHIP must still accrete, or an av backed up in folder A
+            // and later viewed in folder B would never gain B in media_ids
+            // (panel filter and export grouping would omit it there). Only on
+            // this null path, so an accrual can never displace a FULL/META.
+            maybeAccrueFolder(av, mediaId);
+            return;
+        }
+        enqueuePromotion({ av: String(av), merged: rec, mediaId: mediaId, kind: kind, mig: false });
+    }
+
+    // Enqueue a media_ids-only union of the current folder into an EXISTING
+    // record. Routed through the same queue as the real promotions so the
+    // bulk-op deferral, the per-av cancel and the quiesce wait all apply to
+    // it. Hooked from the maybePromoteRecovered null path (above) and from
+    // patchOnceInner's cache-hit fast path (14-orchestrate.js) — the two
+    // paths a confident av takes on every visit AFTER the one that promoted
+    // it. Deliberately NOT hooked from restoreLocalOnly: the credential-less
+    // path stays write-free.
+    function maybeAccrueFolder(av, mediaId) {
+        if (mediaId == null) return;
+        if (!cfg('autoPromoteRestored')) return;
+        if (typeof indexedDB === 'undefined') return;
+        var key = String(mediaId) + '|' + String(av);
+        if (_accrued.has(key)) return;
+        _accrued.add(key);
+        enqueuePromotion({ av: String(av), merged: null, mediaId: mediaId, kind: 'accrue', mig: false });
+    }
+
+    function enqueuePromotion(task) {
+        if (_promoteInFlight.has(task.av)) {
+            // Dedup hit. If the earlier task is still QUEUED, upgrade it in
+            // place when the newcomer outranks it — a FULL arriving while a
+            // META waits out a bulk op (the flap loop keeps running during
+            // walks/imports) must not be dropped, or the recovered cover
+            // would land in the store as a byteless restored_meta and not be
+            // chased again until the GM cache lapses. `mig` is kept from the
+            // queued task so the migration settle counting stays correct.
+            for (var i = 0; i < _promoteQueue.length; i++) {
+                var q = _promoteQueue[i];
+                if (q.av !== task.av) continue;
+                if ((PROMOTE_KIND_RANK[task.kind] || 0) > (PROMOTE_KIND_RANK[q.kind] || 0)) {
+                    q.kind    = task.kind;
+                    q.merged  = task.merged;
+                    q.mediaId = task.mediaId;
+                }
+                return;
+            }
+            // Already RUNNING (in flight, not queued): drop the newcomer.
+            // Self-heals on the next cache-miss resolve — a byteless
+            // restored_meta serves no cover, the merge re-lands
+            // _cover_pending, and the loop re-chases with no competing task.
+            return;
+        }
+        _promoteInFlight.add(task.av);
+        _promoteQueue.push(task);
+        drainPromoteQueue();
+    }
+
+    // Per-av cancellation, the fourth layer of the manager panel's delete
+    // (15b deleteBackupAv): without it an in-flight or queued promotion for
+    // the just-deleted av would idbPut the record right back — the delete
+    // silently undone, the record reappearing in the panel and the export.
+    // A queued task is removed outright; a running one is flagged so its
+    // commitBackupRecord refuses the put (stillValid, checked after the
+    // cover fetch — that await IS the race window).
+    function promoteCancelAv(av) {
+        av = String(av);
+        for (var i = _promoteQueue.length - 1; i >= 0; i--) {
+            if (_promoteQueue[i].av !== av) continue;
+            var t = _promoteQueue.splice(i, 1)[0];
+            _promoteInFlight.delete(av);
+            // A removed migration task still has to settle the counter, or
+            // the migration summary toast would wait forever.
+            if (t.mig) promoteMigrationSettled();
+        }
+        if (_promoteInFlight.has(av)) _promoteCancelled.add(av);
+    }
+
+    // Resolves once no promoteOne body is running. Bulk store writers
+    // (backup walk, import) await this right after raising their flag: the
+    // flag stops the drain from dispatching anything NEW, so this is bounded
+    // by at most cfg('backupBlobConcurrency') in-flight cover fetches
+    // finishing — without it, a promotion parked on a cover download could
+    // resume after the bulk op wrote the same av and clobber that newer
+    // record with its pre-op snapshot.
+    function promoteQuiesce() {
+        return new Promise(function (resolve) {
+            (function check() {
+                if (_promoteActive === 0) { resolve(); return; }
+                setTimeout(check, 100);
+            })();
+        });
+    }
+
+    // Start queued tasks up to the concurrency cap. Deliberately a no-op
+    // while a bulk store operation holds the DB — matching the existing
+    // mutual-refusal pattern between backup / import / export rather than
+    // adding a fourth lock they would all have to learn about.
+    function drainPromoteQueue() {
+        if (_backupRunning || _importRunning || _exportRunning) return;
+        while (_promoteActive < cfg('backupBlobConcurrency') && _promoteQueue.length) {
+            promoteRunTask(_promoteQueue.shift());
+        }
+    }
+
+    // Named helper rather than an inline closure in the while loop above so
+    // each task's completion callbacks capture THEIR task, not the loop var.
+    function promoteRunTask(task) {
+        _promoteActive++;
+        promoteOne(task)
+            .catch(function (e) { warn('promote: task threw for av', task.av, e && e.message); })
+            .then(function () {
+                _promoteActive--;
+                _promoteInFlight.delete(task.av);
+                // A cancel flag is only meaningful for the task it aborted;
+                // a LATER promotion of the same av starts with a clean slate.
+                _promoteCancelled.delete(task.av);
+                if (task.mig) promoteMigrationSettled();
+                drainPromoteQueue();
+            });
+    }
+
+    async function promoteOne(task) {
+        var av = task.av;
+        // Cancelled while queued-then-dispatched in the same tick, or just
+        // before dispatch: honour the delete before touching the store.
+        if (_promoteCancelled.has(av)) return;
+        // The store may have changed while the task sat in the queue (a walk,
+        // an import, a panel delete). Read fresh; a failed read means we do
+        // not know what is archived, and any write would be a blind overwrite
+        // — skip, exactly like the walker's read_failed rule.
+        var existing = null;
+        try { existing = await idbGet(BACKUP_STORE_ITEMS, av); }
+        catch (e) {
+            warn('promote: idbGet failed for av', av, '— skipped:', e && e.message);
+            return;
+        }
+        if (task.kind === 'accrue') {
+            // Folder-membership bookkeeping ONLY: union the folder into an
+            // existing record's media_ids and put it back. backed_at and
+            // data_source are deliberately untouched — an accrual is
+            // bookkeeping, not an observation, and stamping it would tell
+            // the next backup run the record is fresher than it is.
+            if (!existing) return;
+            if (existing.media_ids && existing.media_ids.indexOf(Number(task.mediaId)) >= 0) return;
+            existing.media_ids = backupUnionMediaIds(existing, task.mediaId);
+            // Same delete-wins rule as the real promotions.
+            if (_promoteCancelled.has(av)) return;
+            try { await idbPut(BACKUP_STORE_ITEMS, existing); }
+            catch (e2) { warn('promote: accrue idbPut failed for av', av, e2 && e2.message); }
+            return;
+        }
+        // META write rule: never downgrade a byte-bearing record to a
+        // coverless marker. (In normal flow this cannot even classify META —
+        // a byte-backed record makes phase 0 serve the cover — so this guard
+        // is for races and stale merges, and it is mandatory: the stored blob
+        // has no upstream to re-fetch from.)
+        if (task.kind === 'meta' && existing && existing.cover_blob) return;
+        var built = buildRestoredRecord(av, task.merged, task.mediaId, existing, task.kind);
+        if (!built) return;
+        // No-op guard: an unchanged, already-stored record is not rewritten
+        // (this is what makes re-promotion — and a re-run migration — free).
+        // Only valid when no fresh cover download is due: with a fetchUrl the
+        // pre-fetch candidate still carries the OLD quad and would compare
+        // equal right before the fetch replaced it.
+        if (!built.fetchUrl && promoteSameRecord(built.rec, existing)) return;
+        // Re-checked by commitBackupRecord right before its idbPut: a panel
+        // delete landing during the cover-fetch await must win over this
+        // write (walker tasks carry no stillValid — deletes are panel-only
+        // and the panel is locked while a walk runs).
+        built.stillValid = function () { return !_promoteCancelled.has(av); };
+        var st = { backed: 0, updated: 0, blob_failed: 0, cover_kept: 0, merged_nocover: 0 };
+        var wrote = await commitBackupRecord(built, st);
+        if (wrote) {
+            // Same invalidation the walker and the importer do: the store just
+            // turned "no local data for this av" into "there is now" — and the
+            // logged-out hit memo may hold a merge this write supersedes.
+            _localOnlyMiss.clear();
+            _localOnlyHits.clear();
+            log('promote:', task.kind, 'av', av, existing ? '(updated)' : '(new)');
+        }
+        if (task.mig && _migStats) {
+            if (wrote) {
+                _migStats.written++;
+                if (task.kind === 'meta') _migStats.metaOnly++;
+            } else if (st.merged_nocover) {
+                _migStats.nocover++;
+            }
+        }
+    }
+
+    // Build the record a promotion would store — the 15e counterpart of the
+    // walker's buildBackupRecord, sharing every invariant helper with it.
+    // Field fallback chain is [merged, existing]: a promotion must never
+    // downgrade a field the store already holds just because this recovery
+    // carries fewer of them.
+    function buildRestoredRecord(av, merged, mediaId, existing, kind) {
+        var title = backupPick([merged], 'title');
+        var coverUrl = kind === 'full' ? stripCoverSuffix(backupPick([merged], 'cover') || '') : '';
+        // Same forever-store placeholder gate as the walker: one placeholder
+        // written here would be served back as gospel by SOURCES.backup.
+        if (coverUrl && COVER_PLACEHOLDER_RE.test(coverUrl)) coverUrl = '';
+        if (!title || String(title).trim() === INVALID_TITLE) return null;   // defensive; classifier ensured a title
+        var cf = backupCoverCarryForward(existing, coverUrl);
+        var chain = [merged, existing];
+        var upper = backupPick(chain, 'upper');
+        // Provenance. FULL: 'restored' — except when the store already holds
+        // bytes and no new download is due, where the existing record's own
+        // label stands (a resolve re-confirming a walker capture must not
+        // relabel it; without this the migration would sweep every backed-up
+        // invalid item and stamp 'restored' over honest 'live' records).
+        // META: 'restored_meta' — except a coverless 'live' record keeps its
+        // label (alive at backup time, cover pending its own self-heal); a
+        // legacy coverless 'merged' record upgrading to 'restored_meta' is
+        // fine and more accurate.
+        var ds;
+        if (kind === 'full') {
+            ds = (existing && existing.cover_blob && !cf.fetchUrl)
+               ? (existing.data_source || 'live')
+               : 'restored';
+        } else {
+            ds = (existing && (!existing.data_source || existing.data_source === 'live'))
+               ? (existing.data_source || 'live')
+               : 'restored_meta';
+        }
+        var rec = {
+            av:        av,
+            bvid:      backupPick(chain, 'bvid') || null,
+            title:     title,
+            intro:     backupPick(chain, 'intro') || '',
+            upper:     upper ? { mid: upper.mid, name: upper.name, face: upper.face } : null,
+            cnt_info:  backupPick(chain, 'cnt_info') || null,
+            tid:       backupPick(chain, 'tid'),
+            duration:  backupPick(chain, 'duration'),
+            pubtime:   backupPick(chain, 'pubtime'),
+            ctime:     backupPick(chain, 'ctime'),
+            fav_time:  backupPick(chain, 'fav_time'),
+            pages:     backupPick(chain, 'pages'),
+            page:      backupPick(chain, 'page'),
+            link:      backupPick(chain, 'link') || '',
+            cover_url:  cf.storedUrl,
+            cover_blob: cf.keptBlob,
+            cover_type: cf.keptBlob ? (existing.cover_type || null) : null,
+            cover_size: cf.keptBlob ? (existing.cover_size || 0) : 0,
+            media_ids:  backupUnionMediaIds(existing, mediaId),
+            backed_at:  Date.now(),
+            data_source: ds
+        };
+        return { rec: rec, fetchUrl: cf.fetchUrl, keptBlob: !!cf.keptBlob,
+                 metaOnly: !!existing, requireBytes: kind === 'full' };
+    }
+
+    // Material equality: everything except cover_blob identity (compared by
+    // reference — carry-forward hands back the same handle, mirroring
+    // importSameQuad in 15d), backed_at (a write stamp, not data) and
+    // data_source (provenance labeling alone does not justify a write).
+    // Explicit field list, not JSON of the whole record: records built by
+    // different code paths do not guarantee a stable key order.
+    function promoteSameRecord(cand, existing) {
+        if (!existing) return false;
+        if ((cand.cover_blob || null) !== (existing.cover_blob || null)) return false;
+        var SCALARS = ['bvid', 'title', 'intro', 'tid', 'duration', 'pubtime',
+                       'ctime', 'fav_time', 'page', 'link',
+                       'cover_url', 'cover_type', 'cover_size'];
+        for (var i = 0; i < SCALARS.length; i++) {
+            var k = SCALARS[i];
+            var a = cand[k] != null ? cand[k] : null;
+            var b = existing[k] != null ? existing[k] : null;
+            if (a !== b) return false;
+        }
+        // Small same-shape structures — JSON is stable enough here ('pages'
+        // included because some endpoints return it as an array of parts).
+        if (JSON.stringify(cand.upper    || null) !== JSON.stringify(existing.upper    || null)) return false;
+        if (JSON.stringify(cand.cnt_info || null) !== JSON.stringify(existing.cnt_info || null)) return false;
+        if (JSON.stringify(cand.pages != null ? cand.pages : null)
+            !== JSON.stringify(existing.pages != null ? existing.pages : null)) return false;
+        if (String(cand.media_ids || []) !== String(existing.media_ids || [])) return false;
+        return true;
+    }
+
+    // ─── One-shot migration (the CACHE_VERSION 6→7 rescue) ──────────────
+    //
+    // The v7 bump makes loadCache/loadCacheStale reject every v6 entry —
+    // evaporating exactly the recovered merges this pipeline exists to save.
+    // This sweep reads the v6 generation RAW (GM_getValue, version-agnostic;
+    // neither loader can see the entries any more) and feeds the confident /
+    // title-only subset through the same queue. It is SYNCHRONOUS up to the
+    // enqueue and runs from boot() BEFORE schedule(), so no resolve can
+    // overwrite a v6 key with a v7 stub before the snapshot is taken; the
+    // cover downloads then drain asynchronously at the usual cap.
+    //
+    // One-shot via the GM flag, set right after the synchronous snapshot:
+    // the rescue is safe once snapshotted, and the async writes are
+    // idempotent — a tab closed mid-drain loses nothing, because any av a
+    // later session re-resolves is re-enqueued by the runtime hooks (and an
+    // interrupted session's overwritten-to-v7 avs were promoted by those
+    // hooks already). Individual cover-fetch failures deliberately do NOT
+    // hold the flag open — a permanently dead cover would otherwise re-sweep
+    // hundreds of entries on every boot forever.
+    //
+    // `force` (debug surface only) re-runs regardless of the flag; the
+    // cfg('autoPromoteRestored') gate always applies — an opted-out user's
+    // console should not mass-write the store by accident.
+    function runPromotionMigration(force) {
+        if (!cfg('autoPromoteRestored')) { log('promote: migration skipped (autoPromoteRestored off)'); return 0; }
+        if (!force && GM_getValue(PROMOTE_MIGRATED_FLAG, false)) return 0;
+        if (typeof indexedDB === 'undefined') return 0;
+        if (typeof GM_listValues !== 'function') {
+            warn('promote: GM_listValues unavailable — migration skipped');
+            return 0;
+        }
+        var keys = GM_listValues();
+        var stats = { pending: 0, written: 0, metaOnly: 0, nocover: 0 };
+        for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            if (k.indexOf(CACHE_PREFIX) !== 0) continue;
+            var v = null;
+            try { v = GM_getValue(k, null); } catch (e) { continue; }
+            // Explicitly === 6, not !== CACHE_VERSION: this sweep targets the
+            // pre-bump generation and nothing else, ever.
+            if (!v || v._cache_version !== 6) continue;
+            var kind = promoteClassify(v, true);
+            if (!kind) continue;   // non-confident v6 entries die on the bump
+            var av = k.slice(CACHE_PREFIX.length);
+            if (_promoteInFlight.has(av)) continue;
+            // mediaId null: the GM cache is folder-agnostic. The record lands
+            // with its existing (or empty) media_ids and shows under the
+            // panel's 全部收藏夹 filter; folder membership accretes when the
+            // av is next resolved inside a folder.
+            enqueuePromotion({ av: av, merged: v, mediaId: null, kind: kind, mig: true });
+            stats.pending++;
+        }
+        GM_setValue(PROMOTE_MIGRATED_FLAG, true);
+        if (!stats.pending) return 0;
+        _migStats = stats;
+        log('promote: migration enqueued', stats.pending, 'v6 cache entr(y/ies)');
+        return stats.pending;
+    }
+
+    // Called as each migration task settles; fires the single summary toast
+    // when the last one does. Wording per the release notes: N = records
+    // actually written, M = the coverless (restored_meta) subset of N, K =
+    // confident entries not stored because their cover download failed.
+    // Silent when N and K are both zero — nothing happened worth a banner.
+    function promoteMigrationSettled() {
+        if (!_migStats) return;
+        _migStats.pending--;
+        if (_migStats.pending > 0) return;
+        var s = _migStats;
+        _migStats = null;
+        if (s.written + s.nocover === 0) return;
+        var msg = '已将 ' + s.written + ' 项还原记录转存至本地备份';
+        if (s.metaOnly > 0) msg += '，其中 ' + s.metaOnly + ' 项暂无封面';
+        if (s.nocover > 0)  msg += '，' + s.nocover + ' 项因封面下载失败未收录';
+        toast(msg, 'ok');
     }
     // ─── Menu commands ──────────────────────────────────────────────────
     //
@@ -8432,6 +9252,16 @@
         // The in-page command surface. Installed before the first patch
         // pass so the button is reachable even if a scan stalls.
         try { installFab(); } catch (e) { warn('fab install failed', e); }
+        // One-shot promotion migration (15e-promote.js) MUST run before
+        // schedule(): its synchronous snapshot reads the v6 `item:av*`
+        // generation raw, and the first resolve after the CACHE_VERSION bump
+        // overwrites those keys with v7 stubs that may lack the recovered
+        // data. The sweep is cheap (sync GM reads); the cover downloads drain
+        // in the background afterwards.
+        if (cfg('autoPromoteRestored') && !GM_getValue(PROMOTE_MIGRATED_FLAG, false)) {
+            try { runPromotionMigration(); }
+            catch (e) { warn('promote: migration failed', e); }
+        }
         startObserver();
         schedule();
         // Independent missing-items check from boot — patchOnce only runs
@@ -8492,12 +9322,22 @@
             // markPatched sets data-fav-fix-marked (NOT data-fav-fix-patched).
             // patchCover sets data-fav-fix-original on the <img>. Count both
             // so a partial patch (cover only / mark only) is visible.
-            var cardsMarked = document.querySelectorAll('[data-fav-fix-marked]').length;
+            // :not(img) = containers only: the markers stamp BOTH the img and
+            // its ancestor container, so a document-wide count doubled every
+            // img-bearing card. Strategy-2 no-img cards still count — their
+            // container carries the attribute.
+            var cardsMarked = document.querySelectorAll('[data-fav-fix-marked]:not(img)').length;
             var coversPatched = document.querySelectorAll('img[data-fav-fix-original]').length;
             // cardsLoading: in-flight cards still showing the orange "处理中"
             // badge. Should drop to 0 once patchOnce settles; if it stays >0
             // across multiple stats() calls, a hit is leaking past clearLoading.
             var cardsLoading = document.querySelectorAll('[data-fav-fix-loading]').length;
+            // cardsPartial: title patched, cover still chased (markPartial's
+            // amber outline). These cards deliberately carry NO
+            // data-fav-fix-marked so Strategy 1 keeps re-detecting them —
+            // which means invalidDetectedNow legitimately includes them.
+            // :not(img) for the same containers-only reason as cardsMarked.
+            var cardsPartial = document.querySelectorAll('[data-fav-fix-partial]:not(img)').length;
             return {
                 version: CORE_VERSION,
                 authMode: getAuth().mode,
@@ -8508,6 +9348,7 @@
                 invalidDetectedNow: invalidNow,
                 coversPatched: coversPatched,
                 cardsMarked: cardsMarked,
+                cardsPartial: cardsPartial,
                 cardsLoading: cardsLoading,
                 sourceBackoff: sourceFailureGate.snapshot()
             };
@@ -8588,6 +9429,17 @@
                         scope: { folder: '*', folderTitle: null, query: '', sort: 'none' }
                     });
                 });
+            },
+            // Promotion pipeline (15e-promote.js) — the auto-save of confident
+            // recoveries into the store. queued() is the live task backlog;
+            // migrated() reads the one-shot v6-migration flag; migrateNow()
+            // re-runs the migration REGARDLESS of that flag (verification
+            // aid — promoteOne's value-compare makes a re-run write-free when
+            // nothing changed; the autoPromoteRestored setting still gates it).
+            promote: {
+                queued:     function () { return _promoteQueue.length; },
+                migrated:   function () { return GM_getValue(PROMOTE_MIGRATED_FLAG, false); },
+                migrateNow: function () { return runPromotionMigration(true); }
             }
         },
         // The 停止重试 list (07a-noretry.js). stop()/resume() go through the
@@ -8659,10 +9511,11 @@
                 '__biliFavFix.patchNow()           drop caches and re-scan DOM',
                 '__biliFavFix.forceRefetch(bvOrAv) drop one item cache + re-patch',
                 '__biliFavFix.backup.run()         back up this folder (metadata + covers) to IndexedDB',
-                '__biliFavFix.backup.status()      backup size / covers / quota / last run here',
+                '__biliFavFix.backup.status()      backup size / covers / quota / bySource tally / last run here',
                 '__biliFavFix.backup.manage()      open the backup manager panel (browse / delete)',
                 '__biliFavFix.backup.exportAll()   download the whole backup as one .zip',
                 '__biliFavFix.backup.importFile(f) merge an exported .zip (File/Blob) back into the store',
+                '__biliFavFix.backup.promote       auto-save of recoveries: queued() / migrated() / migrateNow()',
                 '__biliFavFix.noRetry              stop-retry list: list()/counts()/stop(av)/resume(av)/clearAll()',
                 '__biliFavFix.settings.open()      open the settings panel',
                 '__biliFavFix.settings.get(key)    read one setting; .set(key, v) / .reset(key) write it',
