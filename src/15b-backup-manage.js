@@ -293,11 +293,16 @@
                   || _backupRunning || _exportRunning || _importRunning);
     }
 
-    // Three-layer delete (see the header invariants). pageCache is NOT cleared
+    // Four-layer delete (see the header invariants). pageCache is NOT cleared
     // here: it is keyed by page, not by av, so the caller drops it once after a
-    // whole batch instead of once per item.
+    // whole batch instead of once per item. The fourth layer is the promotion
+    // pipeline (15e): a queued or in-flight promotion for this av would
+    // otherwise idbPut the record right back after the delete — an in-flight
+    // one can be parked on a cover download for seconds, plenty of time for
+    // the user's delete to land in between.
     function deleteBackupAv(av) {
         av = String(av);
+        promoteCancelAv(av);
         return idbDelete(BACKUP_STORE_ITEMS, av).then(function () {
             try { clearItemCache(av); }
             catch (e) { warn('mgr: clearItemCache failed for av', av, e && e.message); }

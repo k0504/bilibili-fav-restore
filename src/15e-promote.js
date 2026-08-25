@@ -42,6 +42,17 @@
     var _promoteQueue    = [];         // pending tasks {av, merged, mediaId, kind, mig}
     var _promoteInFlight = new Set();  // avs queued or running — dedup
     var _promoteActive   = 0;          // promoteOne bodies currently running
+    // Avs whose promotion was cancelled by a panel delete while the task was
+    // already RUNNING (a queued task is simply removed instead). The running
+    // task checks this right before its idbPut — the cover-fetch await is a
+    // seconds-wide window in which the user can delete the very record being
+    // promoted, and the delete must win (see promoteCancelAv).
+    var _promoteCancelled = new Set();
+
+    // Task-kind precedence for the queued-task upgrade in enqueuePromotion:
+    // a FULL promotion supersedes a queued META for the same av (the reverse
+    // never downgrades). Ranks, not equality, so future kinds slot in.
+    var PROMOTE_KIND_RANK = { full: 3, meta: 2 };
 
     var PROMOTE_MIGRATED_FLAG = 'promote:migrated:v7';
 
@@ -83,10 +94,69 @@
     }
 
     function enqueuePromotion(task) {
-        if (_promoteInFlight.has(task.av)) return;
+        if (_promoteInFlight.has(task.av)) {
+            // Dedup hit. If the earlier task is still QUEUED, upgrade it in
+            // place when the newcomer outranks it — a FULL arriving while a
+            // META waits out a bulk op (the flap loop keeps running during
+            // walks/imports) must not be dropped, or the recovered cover
+            // would land in the store as a byteless restored_meta and not be
+            // chased again until the GM cache lapses. `mig` is kept from the
+            // queued task so the migration settle counting stays correct.
+            for (var i = 0; i < _promoteQueue.length; i++) {
+                var q = _promoteQueue[i];
+                if (q.av !== task.av) continue;
+                if ((PROMOTE_KIND_RANK[task.kind] || 0) > (PROMOTE_KIND_RANK[q.kind] || 0)) {
+                    q.kind    = task.kind;
+                    q.merged  = task.merged;
+                    q.mediaId = task.mediaId;
+                }
+                return;
+            }
+            // Already RUNNING (in flight, not queued): drop the newcomer.
+            // Self-heals on the next cache-miss resolve — a byteless
+            // restored_meta serves no cover, the merge re-lands
+            // _cover_pending, and the loop re-chases with no competing task.
+            return;
+        }
         _promoteInFlight.add(task.av);
         _promoteQueue.push(task);
         drainPromoteQueue();
+    }
+
+    // Per-av cancellation, the fourth layer of the manager panel's delete
+    // (15b deleteBackupAv): without it an in-flight or queued promotion for
+    // the just-deleted av would idbPut the record right back — the delete
+    // silently undone, the record reappearing in the panel and the export.
+    // A queued task is removed outright; a running one is flagged so its
+    // commitBackupRecord refuses the put (stillValid, checked after the
+    // cover fetch — that await IS the race window).
+    function promoteCancelAv(av) {
+        av = String(av);
+        for (var i = _promoteQueue.length - 1; i >= 0; i--) {
+            if (_promoteQueue[i].av !== av) continue;
+            var t = _promoteQueue.splice(i, 1)[0];
+            _promoteInFlight.delete(av);
+            // A removed migration task still has to settle the counter, or
+            // the migration summary toast would wait forever.
+            if (t.mig) promoteMigrationSettled();
+        }
+        if (_promoteInFlight.has(av)) _promoteCancelled.add(av);
+    }
+
+    // Resolves once no promoteOne body is running. Bulk store writers
+    // (backup walk, import) await this right after raising their flag: the
+    // flag stops the drain from dispatching anything NEW, so this is bounded
+    // by at most cfg('backupBlobConcurrency') in-flight cover fetches
+    // finishing — without it, a promotion parked on a cover download could
+    // resume after the bulk op wrote the same av and clobber that newer
+    // record with its pre-op snapshot.
+    function promoteQuiesce() {
+        return new Promise(function (resolve) {
+            (function check() {
+                if (_promoteActive === 0) { resolve(); return; }
+                setTimeout(check, 100);
+            })();
+        });
     }
 
     // Start queued tasks up to the concurrency cap. Deliberately a no-op
@@ -109,6 +179,9 @@
             .then(function () {
                 _promoteActive--;
                 _promoteInFlight.delete(task.av);
+                // A cancel flag is only meaningful for the task it aborted;
+                // a LATER promotion of the same av starts with a clean slate.
+                _promoteCancelled.delete(task.av);
                 if (task.mig) promoteMigrationSettled();
                 drainPromoteQueue();
             });
@@ -116,6 +189,9 @@
 
     async function promoteOne(task) {
         var av = task.av;
+        // Cancelled while queued-then-dispatched in the same tick, or just
+        // before dispatch: honour the delete before touching the store.
+        if (_promoteCancelled.has(av)) return;
         // The store may have changed while the task sat in the queue (a walk,
         // an import, a panel delete). Read fresh; a failed read means we do
         // not know what is archived, and any write would be a blind overwrite
@@ -140,6 +216,11 @@
         // pre-fetch candidate still carries the OLD quad and would compare
         // equal right before the fetch replaced it.
         if (!built.fetchUrl && promoteSameRecord(built.rec, existing)) return;
+        // Re-checked by commitBackupRecord right before its idbPut: a panel
+        // delete landing during the cover-fetch await must win over this
+        // write (walker tasks carry no stillValid — deletes are panel-only
+        // and the panel is locked while a walk runs).
+        built.stillValid = function () { return !_promoteCancelled.has(av); };
         var st = { backed: 0, updated: 0, blob_failed: 0, cover_kept: 0, merged_nocover: 0 };
         var wrote = await commitBackupRecord(built, st);
         if (wrote) {

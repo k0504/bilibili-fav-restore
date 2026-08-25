@@ -436,6 +436,11 @@
         if (_importRunning) { toast('导入进行中，请稍后再试', 'warn'); return null; }
         _importRunning = true;
         try {
+            // The flag stops the promotion drain from dispatching new tasks;
+            // this wait lets the few already-running ones finish so none can
+            // resume mid-import and overwrite a freshly merged record with a
+            // pre-import snapshot (15e promoteQuiesce).
+            await promoteQuiesce();
             return await importBackupFileInner(file, opts);
         } finally {
             _importRunning = false;

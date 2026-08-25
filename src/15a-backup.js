@@ -388,6 +388,12 @@
             stats.merged_nocover++;
             return false;
         }
+        // Last gate before the put: a panel delete raced this write and the
+        // user's delete wins (15e promoteCancelAv). Deliberately checked HERE,
+        // after the cover fetch — that await is the seconds-wide window the
+        // race lives in. Walker tasks carry no stillValid (the panel is
+        // locked against deletes while a walk runs).
+        if (task.stillValid && !task.stillValid()) return false;
         if (task.metaOnly) stats.updated++;
         else stats.backed++;
         try { await idbPut(BACKUP_STORE_ITEMS, task.rec); return true; }
@@ -430,6 +436,11 @@
 
         _backupRunning = true;
         requestPersistentStorageOnce();
+        // The flag above stops the promotion drain from dispatching anything
+        // NEW; this wait lets the ≤ backupBlobConcurrency already-running
+        // tasks finish, so none of them can resume after this walk wrote the
+        // same av and clobber the newer record with a pre-walk snapshot.
+        await promoteQuiesce();
         var stats = {
             total_seen: 0, backed: 0, updated: 0, skipped_invalid: 0,
             blob_failed: 0, cover_kept: 0, read_failed: 0, merged_nocover: 0

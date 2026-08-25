@@ -371,6 +371,8 @@
             // and has nothing else that would repaint it once the run ends.
             mgrExportReleased();
             // Promotion tasks defer while an export runs (15e); resume them.
+            // (No promoteQuiesce on entry, unlike walk/import: export is a
+            // pure reader and its per-record idbGets are atomic.)
             drainPromoteQueue();
         }
     }
