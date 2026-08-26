@@ -98,7 +98,7 @@ bilibili 的 Android 端收藏接口并不稳定，同一收藏夹的失效条�
 
 - [仓库主页](https://github.com/k0504/bilibili-fav-restore)
 - [问题反馈 / Issues](https://github.com/k0504/bilibili-fav-restore/issues)
-- [完整开发文档 README](https://github.com/k0504/bilibili-fav-restore/blob/main/README.md)
+- [使用手册](https://github.com/k0504/bilibili-fav-restore/blob/main/docs/MANUAL.md)与[开发文档](https://github.com/k0504/bilibili-fav-restore/blob/main/docs/DEVELOPMENT.md)
 - [直接安装源（GitHub Raw）](https://raw.githubusercontent.com/k0504/bilibili-fav-restore/main/dist/bilibili-fav-restore.user.js)
 
 欢迎提交 Issue 报告 bug、提交 Pull Request 增加新的归档源或修复 bilibili 接口签名变更。
