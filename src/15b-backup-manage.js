@@ -24,6 +24,12 @@
     //     index would pin them. The in-memory index below therefore copies
     //     PRIMITIVES ONLY. Thumbnails are read per visible page and their
     //     objectURLs revoked on every re-render and on close.
+    //   - The membership status column is DERIVED, never stored on a record.
+    //     15f-membership.js keeps one snapshot per folder in GM storage and
+    //     the classifier turns (av, media_ids, current folder filter) into
+    //     in / out / unknown at render time. Nothing here writes to the items
+    //     store for it, and the status a row shows is relative to the folder
+    //     currently selected — the same record reads differently under 全部.
     //   - Panel nodes are prefixed `fav-fix-mgr-` and match none of
     //     CARD_SELECTOR, so the MutationObserver's card scan (14-orchestrate.js)
     //     never mistakes a row for a bilibili video card.
@@ -75,8 +81,12 @@
             '  margin-top: 2px; font-size: 12px; color: #9499a0;',
             '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
             '}',
+            // wrap: the row carries a search box and three labelled selects,
+            // and the folder select grows with the longest folder name. At
+            // 92vw on a narrow window that overflows the panel; wrapping costs
+            // one extra line instead of a clipped control.
             '.fav-fix-mgr-tools {',
-            '  display: flex; align-items: center; gap: 10px;',
+            '  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
             '  padding: 10px 18px; border-bottom: 1px solid #f1f2f3;',
             '}',
             '.fav-fix-mgr-input {',
@@ -166,8 +176,17 @@
             '  font-size: 10px; line-height: 15px; vertical-align: 1px;',
             '}',
             '.fav-fix-mgr-tag-merged { background: #909399; }',
+            // Membership status. Only 'out' is loud: it is the one state the
+            // user can act on, and a list where every row shouts is a list
+            // where nothing stands out. 'in' is the ordinary case and 'unknown'
+            // is an absence of information — both stay quiet.
+            '.fav-fix-mgr-tag-out { background: #e13c53; }',
+            '.fav-fix-mgr-tag-in { background: #f1f2f3; color: #61666d; }',
+            '.fav-fix-mgr-tag-unknown { background: #e3e5e7; color: #9499a0; }',
+            // Same wrap reasoning as the tools row: four actions, a page
+            // readout and two nav buttons do not fit one line at every width.
             '.fav-fix-mgr-foot {',
-            '  display: flex; align-items: center; gap: 10px;',
+            '  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
             '  padding: 10px 18px; border-top: 1px solid #e3e5e7;',
             '}',
             '.fav-fix-mgr-pageinfo {',
@@ -252,8 +271,14 @@
     function mgrFolderMetaText() {
         var s = _mgrState;
         if (s.folder === '*') return '';
+        // Independent of the backup meta below and appended to both of its
+        // branches: a folder can have been checked without ever being backed
+        // up in full, and vice versa. Reading "上次备份 … 上次检查 …" side by
+        // side is also what makes either label unambiguous.
+        var st = s.memberStamps.get(String(s.folder));
+        var scan = st ? ' · 上次检查：' + mgrDate(st) : ' · 尚未检查';
         var m = s.metas.get(String(s.folder));
-        if (!m || !m.last_run) return ' · 未完整备份过';
+        if (!m || !m.last_run) return ' · 未完整备份过' + scan;
         var days = Math.floor((Date.now() - m.last_run) / 86400000);
         var txt = ' · 上次备份：' + (days <= 0 ? '今天' : days + ' 天前')
                 + '（' + (m.total_seen || 0) + ' 项）';
@@ -267,13 +292,38 @@
                  ? ' · 上次尝试中止于第 ' + m.last_attempt_page + ' 页'
                  : ' · 上次尝试未完整完成';
         }
-        return txt;
+        return txt + scan;
+    }
+
+    // Every media_id the index mentions, deduped, as strings. Two callers: the
+    // membership scan's 全部 scope, and the snapshot reload below.
+    // Deliberately not folded into mgrRenderFolders — that one needs per-folder
+    // counts and would have to hand back a second structure to serve both.
+    function mgrIndexFolderIds() {
+        var s = _mgrState;
+        var seen = new Set();
+        for (var i = 0; i < s.index.length; i++) {
+            var ids = s.index[i].media_ids;
+            for (var j = 0; j < ids.length; j++) seen.add(String(ids[j]));
+        }
+        return Array.from(seen);
+    }
+
+    // Snapshots are read from GM storage rather than kept in sync in memory:
+    // a scan may be started by one panel and land after it was closed and
+    // another opened, so re-reading is the only way both see the same data.
+    function mgrReloadMembership() {
+        var s = _mgrState;
+        if (!s) return;
+        var got = loadMembershipSnapshots(mgrIndexFolderIds());
+        s.membership = got.snaps;
+        s.memberStamps = got.stamps;
     }
 
     // The panel's mutual-exclusion matrix in ONE place. Every long operation
-    // (delete, in-panel backup, export, import) excludes every other one, and
-    // the set is now large enough that spelling it out at each of its eight
-    // call sites is how one of them ends up missing a term.
+    // (delete, in-panel backup, export, import, membership scan) excludes every
+    // other one, and the set is now large enough that spelling it out at each
+    // of its call sites is how one of them ends up missing a term.
     //
     // The MODULE flags are part of the expression, not just the panel's own
     // s.*Busy: an export or an import SURVIVES the panel it was started from
@@ -289,8 +339,8 @@
     function mgrLocked() {
         var s = _mgrState;
         if (!s) return true;
-        return !!(s.busy || s.backupBusy || s.exportBusy || s.importBusy
-                  || _backupRunning || _exportRunning || _importRunning);
+        return !!(s.busy || s.backupBusy || s.exportBusy || s.importBusy || s.membershipBusy
+                  || _backupRunning || _exportRunning || _importRunning || _membershipRunning);
     }
 
     // Four-layer delete (see the header invariants). pageCache is NOT cleared
@@ -332,8 +382,15 @@
         var s = _mgrState;
         var q = s.query.trim().toLowerCase();
         var fid = s.folder;
+        var want = s.status;
         s.filtered = s.index.filter(function (r) {
             if (fid !== '*' && r.media_ids.indexOf(Number(fid)) < 0) return false;
+            // Membership is evaluated against the folder scope currently in
+            // force, so one record can read 不在此收藏夹 under a single folder
+            // and 在收藏夹 under 全部 (it lives in another folder). The
+            // classifier owns that rule; see membershipStatus in 15f.
+            if (want !== '*'
+                && membershipStatus(r.av, r.media_ids, fid, s.membership) !== want) return false;
             if (!q) return true;
             return r.title.toLowerCase().indexOf(q) >= 0
                 || r.bvid.toLowerCase().indexOf(q) >= 0
@@ -479,6 +536,16 @@
                 r.cover_size ? fmtBytes(r.cover_size) : '无封面',
                 r.bvid || ('av' + r.av)
             ].join(' · ');
+            // Membership tag. The wording carries its own scope so the reader
+            // never has to remember what the badge is relative to: with one
+            // folder selected it says 此收藏夹, under 全部 it says 任何收藏夹.
+            // 未检查 is a real third state, not a blank — an absent tag would
+            // be indistinguishable from "checked and still there".
+            var mem = membershipStatus(r.av, r.media_ids, s.folder, s.membership);
+            var scoped = s.folder !== '*';
+            var memTxt = mem === 'out' ? (scoped ? '不在此收藏夹' : '不在任何收藏夹')
+                       : mem === 'in'  ? (scoped ? '在此收藏夹' : '在收藏夹')
+                       : '未检查';
             row.innerHTML =
                 (r.hasCover
                     ? '<img class="fav-fix-mgr-thumb" alt="">'
@@ -487,6 +554,7 @@
                 +   '<div class="fav-fix-mgr-name" title="' + esc(r.title) + '">' + esc(r.title) + '</div>'
                 +   '<div class="fav-fix-mgr-sub">' + esc(sub)
                 +     '<span class="fav-fix-mgr-tag' + tagCls + '">' + esc(tagTxt) + '</span>'
+                +     '<span class="fav-fix-mgr-tag fav-fix-mgr-tag-' + mem + '">' + esc(memTxt) + '</span>'
                 +   '</div>'
                 + '</div>'
                 + '<button class="fav-fix-mgr-btn fav-fix-mgr-del">删除</button>';
@@ -522,6 +590,10 @@
         // import exists to fix, so this is the one footer action that must
         // stay reachable when the list has nothing in it.
         s.els.importBtn.disabled = locked;
+        // Gated on the INDEX, not the filtered total: an empty filter result
+        // is often precisely what a scan would explain (everything currently
+        // reads 未检查), while an empty store has no folder to check at all.
+        s.els.check.disabled = locked || !s.index.length;
         if (locked) {
             var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
             for (var d = 0; d < dels.length; d++) dels[d].disabled = true;
@@ -551,6 +623,7 @@
         s.els.bulk.disabled = locked || !s.filtered.length;
         s.els.exportBtn.disabled = locked || !s.filtered.length;
         s.els.importBtn.disabled = locked;
+        s.els.check.disabled = locked || !s.index.length;
         var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
         for (var i = 0; i < dels.length; i++) dels[i].disabled = locked;
     }
@@ -573,6 +646,19 @@
     function mgrImportReleased() {
         var s = _mgrState;
         if (!s || s.importBusy) return;   // no panel, or the owner repaints itself
+        mgrRenderList();
+    }
+
+    // The membership counterpart, called by scanMembership (15f-membership.js)
+    // once a run releases _membershipRunning. Same reason as the two above —
+    // and one more: this panel did not start the scan, so its in-memory
+    // snapshots predate the run and every row's tag would keep showing the
+    // old verdict until some unrelated interaction happened to re-render.
+    function mgrMembershipReleased() {
+        var s = _mgrState;
+        if (!s || s.membershipBusy) return;   // no panel, or the owner repaints itself
+        mgrReloadMembership();
+        if (s.status !== '*') mgrApplyFilter();
         mgrRenderList();
     }
 
@@ -628,6 +714,10 @@
             s.index = res[0];
             s.names = res[1].names;
             s.metas = res[1].metas;
+            // A walk can introduce a folder the index did not mention before;
+            // if a snapshot for it is already on disk, load it now rather than
+            // showing 未检查 over data we hold.
+            mgrReloadMembership();
             mgrLoadQuota();
             mgrResyncSearch();
             mgrRenderHead();
@@ -670,7 +760,11 @@
         if (mgrLocked()) return;
         var targets = s.filtered.slice();
         if (!targets.length) return;
-        var whole = (s.folder === '*' && !s.query.trim());
+        // Every narrowing control has to appear here: the message claims the
+        // batch is the WHOLE store, and a status filter narrows the set just
+        // as a folder or a search term does. Leaving it out would announce
+        // 将清空全部备份 over a 仅不在收藏夹 selection.
+        var whole = (s.folder === '*' && s.status === '*' && !s.query.trim());
         var msg = whole
             ? '将清空全部备份，共 ' + targets.length + ' 项。\n\n删除后无法恢复，确定继续？'
             : '将删除当前筛选结果，共 ' + targets.length + ' 项。\n\n删除后无法恢复，确定继续？';
@@ -872,6 +966,19 @@
                 +     '<label class="fav-fix-mgr-field"><span>收藏夹</span>'
                 +       '<select class="fav-fix-mgr-select"><option value="*">全部</option></select>'
                 +     '</label>'
+                // Next to the folder select because both are filters; 排序
+                // stays last as the only control that reorders rather than
+                // narrows. Option labels avoid naming a scope — what "在收藏夹"
+                // means depends on the folder selection, and the per-row tag
+                // is where that scope is spelled out.
+                +     '<label class="fav-fix-mgr-field"><span>状态</span>'
+                +       '<select class="fav-fix-mgr-select fav-fix-mgr-status">'
+                +         '<option value="*">全部</option>'
+                +         '<option value="out">仅不在收藏夹</option>'
+                +         '<option value="in">仅在收藏夹</option>'
+                +         '<option value="unknown">仅未检查</option>'
+                +       '</select>'
+                +     '</label>'
                 +     '<label class="fav-fix-mgr-field"><span>排序</span>'
                 +       '<select class="fav-fix-mgr-select fav-fix-mgr-sort">'
                 +         '<option value="fav_desc">最新收藏在前</option>'
@@ -888,6 +995,11 @@
                 // Neutral outline, no count: the red framing and the item
                 // count on the bulk delete are a confirmation affordance for a
                 // destructive act, and an export needs neither.
+                // First of the three neutral actions: it is the one that
+                // produces the information the other controls filter on, and
+                // it reads left-to-right as 检查 → 导出 → 导入 before the
+                // destructive action at the far end.
+                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-check" disabled>检查是否仍在收藏夹</button>'
                 +     '<button class="fav-fix-mgr-btn fav-fix-mgr-export" disabled>导出筛选结果</button>'
                 // Beside the export and equally neutral: the two halves of the
                 // same round trip belong next to each other, and both stay
@@ -904,14 +1016,20 @@
 
             _mgrState = {
                 index: [], filtered: [], page: 1, query: '', folder: '*',
-                sort: 'fav_desc',
+                sort: 'fav_desc', status: '*',
                 names: new Map(), metas: new Map(), quotaText: null,
+                // Folder membership snapshots (15f): media_id → Set of av
+                // strings, plus when each was taken. Loaded from GM storage on
+                // open and after every scan; absent entries are what the
+                // classifier reports as 未检查.
+                membership: new Map(), memberStamps: new Map(),
                 currentMid: detectMediaId(),
                 urls: [], renderToken: 0,
                 // One flag per long operation rather than a single lock: they
                 // exclude each other but disable different controls, and the
                 // release paths are independent.
                 busy: false, backupBusy: false, exportBusy: false, importBusy: false,
+                membershipBusy: false,
                 searchTimer: null,
                 onKeydown: null,
                 els: {
@@ -919,7 +1037,13 @@
                     body:     host.querySelector('.fav-fix-mgr-body'),
                     search:   host.querySelector('.fav-fix-mgr-input'),
                     folder:   host.querySelector('.fav-fix-mgr-select'),
+                    // Queried by its own class, never by .fav-fix-mgr-select:
+                    // the folder select above takes that selector by being
+                    // first in document order, which is not a property worth
+                    // making two controls depend on.
+                    status:   host.querySelector('.fav-fix-mgr-status'),
                     sort:     host.querySelector('.fav-fix-mgr-sort'),
+                    check:    host.querySelector('.fav-fix-mgr-check'),
                     backup:   host.querySelector('.fav-fix-mgr-backup'),
                     // Not `els.export`: a bare `export` identifier is reserved,
                     // and a property that cannot be destructured or aliased
@@ -969,11 +1093,46 @@
                 mgrApplyFilter();
                 mgrRenderList();
             });
+            s.els.status.addEventListener('change', function () {
+                if (s.busy) { s.els.status.value = s.status; return; }
+                s.status = s.els.status.value;
+                mgrApplyFilter();
+                mgrRenderList();
+            });
             s.els.sort.addEventListener('change', function () {
                 if (s.busy) { s.els.sort.value = s.sort; return; }
                 s.sort = s.els.sort.value;
                 mgrApplyFilter();
                 mgrRenderList();
+            });
+            // Scope follows the folder filter: one folder selected checks just
+            // that folder, 全部 checks every folder the index mentions. Unlike
+            // the backup button above it never re-detects the page's folder —
+            // it answers a question about what the panel is currently showing.
+            s.els.check.addEventListener('click', function () {
+                if (mgrLocked()) return;
+                var targets = s.folder !== '*' ? [s.folder] : mgrIndexFolderIds();
+                if (!targets.length) { toast('没有可检查的收藏夹', 'warn'); return; }
+                s.membershipBusy = true;
+                s.els.check.disabled = true;
+                s.els.check.textContent = '检查中…';
+                mgrRenderList();
+                scanMembership(targets).catch(function (e) {
+                    warn('mgr: membership scan threw', e);
+                    toast('检查失败：' + (e && e.message), 'err');
+                    return null;
+                }).then(function () {
+                    if (_mgrState !== s) return;
+                    s.membershipBusy = false;
+                    s.els.check.disabled = false;
+                    s.els.check.textContent = '检查是否仍在收藏夹';
+                    mgrReloadMembership();
+                    // Every row's tag changes, but the filtered SET only moves
+                    // when a status filter is active — so the reader keeps
+                    // their page unless the filter itself was affected.
+                    if (s.status !== '*') mgrApplyFilter();
+                    mgrRenderList();
+                });
             });
             s.els.exportBtn.addEventListener('click', mgrExportFiltered);
             s.els.importBtn.addEventListener('click', mgrImportBackup);
@@ -1032,6 +1191,10 @@
             s.index = index;
             s.names = layers.names;
             s.metas = layers.metas;
+            // Snapshots persist across sessions, so a panel opened long after
+            // the last scan still shows its verdicts. Must follow s.index —
+            // the folder set to load is derived from it.
+            mgrReloadMembership();
             mgrRenderHead();
             mgrRenderFolders();
             mgrApplyFilter();

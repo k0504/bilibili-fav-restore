@@ -65,6 +65,7 @@ MANIFEST = [
     '15c-backup-export.js', # CRC-32 + STORE zip writer + exportBackupRows
     '15d-backup-import.js', # zip reader + importBackupFile (merge back into IDB)
     '15e-promote.js',       # recovery→backup promotion queue + one-shot v6 migration
+    '15f-membership.js',    # per-folder av-set snapshots (GM favids:) + scan + classifier
     '16-menu-commands.js',  # command implementations + GM_registerMenuCommand wiring
     '16a-fab.js',           # draggable floating action button + two-level menu
     '16b-settings.js',      # settings modal rendered from SETTINGS_SCHEMA

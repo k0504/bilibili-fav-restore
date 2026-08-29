@@ -48,7 +48,13 @@
         _localOnlyHits.clear();
     }
 
-    async function fetchAllAvList(mediaId) {
+    // `force` drops the cached answer first. detectMissing never passes it —
+    // its scan is automatic and a per-page-life cache is exactly right there.
+    // The membership scan (15f) does: that one runs because the user pressed
+    // a button meaning "tell me the situation now", and serving a read taken
+    // earlier in this page's life would answer a different question.
+    async function fetchAllAvList(mediaId, force) {
+        if (force) _idsListCache.delete(mediaId);
         if (_idsListCache.has(mediaId)) return _idsListCache.get(mediaId);
         var url = 'https://api.bilibili.com/x/v3/fav/resource/ids?media_id='
                 + mediaId + '&platform=web';
