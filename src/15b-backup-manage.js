@@ -594,6 +594,12 @@
         // is often precisely what a scan would explain (everything currently
         // reads 未检查), while an empty store has no folder to check at all.
         s.els.check.disabled = locked || !s.index.length;
+        // The backup button was the one control the matrix disabled in its own
+        // click handler but never repainted from mgrLocked, so during any OTHER
+        // long operation it kept offering itself and its guard silently
+        // swallowed the click. Its label is left alone: while a walk owns it,
+        // that label is the progress text its handler is driving.
+        s.els.backup.disabled = locked;
         if (locked) {
             var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
             for (var d = 0; d < dels.length; d++) dels[d].disabled = true;
@@ -624,6 +630,7 @@
         s.els.exportBtn.disabled = locked || !s.filtered.length;
         s.els.importBtn.disabled = locked;
         s.els.check.disabled = locked || !s.index.length;
+        s.els.backup.disabled = locked;
         var dels = s.els.body.querySelectorAll('.fav-fix-mgr-del');
         for (var i = 0; i < dels.length; i++) dels[i].disabled = locked;
     }
