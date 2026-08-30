@@ -5546,13 +5546,24 @@
             '  transition: background .1s;',
             '}',
             '.fav-fix-mgr-row:hover { background: #f8f9fb; }',
-            // Fixed 96x60 box for both the real thumbnail and the placeholder,
-            // so rows keep the same height whether or not a cover was archived.
+            // Cover and title are real anchors to the video page rather than
+            // click handlers: middle-click, ctrl-click, the context menu and
+            // the status-bar URL preview all come for free. target=_blank is
+            // load-bearing, not a preference — the panel carries filter, sort
+            // and page state that a same-tab navigation would discard.
+            // The anchor, not the image, is the flex item and owns the fixed
+            // 96x60 box, so rows keep the same height whether or not a cover
+            // was archived and the hit area is identical in both cases.
+            '.fav-fix-mgr-cover {',
+            '  flex: 0 0 96px; display: block; width: 96px; height: 60px;',
+            '  border-radius: 4px; overflow: hidden;',
+            '}',
             '.fav-fix-mgr-thumb, .fav-fix-mgr-noimg {',
-            '  width: 96px; height: 60px; flex: 0 0 96px;',
+            '  display: block; width: 96px; height: 60px;',
             '  border-radius: 4px; background: #f1f2f3;',
             '}',
-            '.fav-fix-mgr-thumb { object-fit: cover; }',
+            '.fav-fix-mgr-thumb { object-fit: cover; transition: opacity .15s; }',
+            '.fav-fix-mgr-cover:hover .fav-fix-mgr-thumb { opacity: .82; }',
             '.fav-fix-mgr-noimg {',
             '  display: flex; align-items: center; justify-content: center;',
             '  color: #c9ccd0; font-size: 11px;',
@@ -5561,7 +5572,15 @@
             '.fav-fix-mgr-name, .fav-fix-mgr-sub {',
             '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
             '}',
-            '.fav-fix-mgr-name { font-size: 13px; font-weight: 500; }',
+            // display:block is required for the ellipsis above — an inline
+            // anchor does not clip. Hover uses bilibili link blue (#00aeec,
+            // as in 13-missing.js); #fb7299 stays reserved for the one
+            // primary action, so a list of 20 titles cannot out-shout it.
+            '.fav-fix-mgr-name {',
+            '  display: block; font-size: 13px; font-weight: 500;',
+            '  color: inherit; text-decoration: none;',
+            '}',
+            '.fav-fix-mgr-name:hover { color: #00aeec; }',
             '.fav-fix-mgr-sub { margin-top: 3px; font-size: 11px; color: #9499a0; }',
             '.fav-fix-mgr-tag {',
             '  display: inline-block; margin-left: 6px; padding: 0 5px;',
@@ -5954,12 +5973,26 @@
             var memTxt = mem === 'out' ? (scoped ? '不在此收藏夹' : '不在任何收藏夹')
                        : mem === 'in'  ? (scoped ? '在此收藏夹' : '在收藏夹')
                        : '未检查';
+            // Second occurrence of this URL shape (13-missing.js:266 is the
+            // first); rule of three says do not extract a helper yet. bvid is
+            // preferred because the av path only redirects, and esc() guards
+            // the href for the same defense-in-depth reason as there.
+            var vidUrl = 'https://www.bilibili.com/video/'
+                       + (r.bvid ? esc(r.bvid) : 'av' + esc(String(r.av)));
+            // An empty title would render an anchor with no text — a dead
+            // click target in the one place the row promises a link. Records
+            // whose title never resolved get a visible stand-in instead.
+            var nameTxt = esc(r.title || '（无标题）');
             row.innerHTML =
-                (r.hasCover
-                    ? '<img class="fav-fix-mgr-thumb" alt="">'
-                    : '<div class="fav-fix-mgr-noimg">无封面</div>')
+                '<a class="fav-fix-mgr-cover" href="' + vidUrl + '" target="_blank"'
+                +    ' rel="noopener" title="' + nameTxt + '">'
+                +   (r.hasCover
+                        ? '<img class="fav-fix-mgr-thumb" alt="">'
+                        : '<div class="fav-fix-mgr-noimg">无封面</div>')
+                + '</a>'
                 + '<div class="fav-fix-mgr-info">'
-                +   '<div class="fav-fix-mgr-name" title="' + esc(r.title) + '">' + esc(r.title) + '</div>'
+                +   '<a class="fav-fix-mgr-name" href="' + vidUrl + '" target="_blank"'
+                +      ' rel="noopener" title="' + nameTxt + '">' + nameTxt + '</a>'
                 +   '<div class="fav-fix-mgr-sub">' + esc(sub)
                 +     '<span class="fav-fix-mgr-tag' + tagCls + '">' + esc(tagTxt) + '</span>'
                 +     '<span class="fav-fix-mgr-tag fav-fix-mgr-tag-' + mem + '">' + esc(memTxt) + '</span>'
