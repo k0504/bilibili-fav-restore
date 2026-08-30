@@ -5576,15 +5576,30 @@
             '.fav-fix-mgr-tag-out { background: #e13c53; }',
             '.fav-fix-mgr-tag-in { background: #f1f2f3; color: #61666d; }',
             '.fav-fix-mgr-tag-unknown { background: #e3e5e7; color: #9499a0; }',
-            // Same wrap reasoning as the tools row: four actions, a page
-            // readout and two nav buttons do not fit one line at every width.
+            // The footer carries two unrelated concerns — bulk actions over
+            // the filtered set, and navigation within it — whose combined
+            // width exceeds the panel at every realistic label length (the
+            // bulk delete alone grows with the item count). A single flat
+            // wrapping row therefore breaks at whatever button happens to sit
+            // at the overflow point, orphaning it. Two wrapping GROUPS inside
+            // a wrapping footer force the break to land between the concerns.
             '.fav-fix-mgr-foot {',
-            '  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
+            '  display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap;',
             '  padding: 10px 18px; border-top: 1px solid #e3e5e7;',
             '}',
+            '.fav-fix-mgr-foot-actions, .fav-fix-mgr-foot-pager {',
+            '  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;',
+            '}',
+            '.fav-fix-mgr-foot-actions { flex: 1 1 auto; }',
+            // margin-left:auto keeps the pager right-aligned whether it shares
+            // the first line or has wrapped onto one of its own.
+            '.fav-fix-mgr-foot-pager { flex: 0 0 auto; margin-left: auto; }',
+            // No flex:1 here. It used to stretch the readout across whatever
+            // gap was left on the first line, which is precisely what squeezed
+            // it to "第 1 /…"; inside the pager group its natural width is the
+            // right width.
             '.fav-fix-mgr-pageinfo {',
-            '  flex: 1; text-align: right; font-size: 12px; color: #9499a0;',
-            '  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+            '  font-size: 12px; color: #9499a0; white-space: nowrap;',
             '}'
         ].join('\n');
         (document.head || document.documentElement).appendChild(st);
@@ -6392,6 +6407,7 @@
                 +     '<div class="fav-fix-mgr-note">正在读取备份…</div>'
                 +   '</div>'
                 +   '<div class="fav-fix-mgr-foot">'
+                +     '<div class="fav-fix-mgr-foot-actions">'
                 // Neutral outline, no count: the red framing and the item
                 // count on the bulk delete are a confirmation affordance for a
                 // destructive act, and an export needs neither.
@@ -6399,16 +6415,19 @@
                 // produces the information the other controls filter on, and
                 // it reads left-to-right as 检查 → 导出 → 导入 before the
                 // destructive action at the far end.
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-check" disabled>检查是否仍在收藏夹</button>'
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-export" disabled>导出筛选结果</button>'
+                +       '<button class="fav-fix-mgr-btn fav-fix-mgr-check" disabled>检查是否仍在收藏夹</button>'
+                +       '<button class="fav-fix-mgr-btn fav-fix-mgr-export" disabled>导出筛选结果</button>'
                 // Beside the export and equally neutral: the two halves of the
                 // same round trip belong next to each other, and both stay
                 // quieter than the destructive action to their right.
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-import" disabled>导入备份文件</button>'
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
-                +     '<div class="fav-fix-mgr-pageinfo"></div>'
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-prev" disabled>上一页</button>'
-                +     '<button class="fav-fix-mgr-btn fav-fix-mgr-next" disabled>下一页</button>'
+                +       '<button class="fav-fix-mgr-btn fav-fix-mgr-import" disabled>导入备份文件</button>'
+                +       '<button class="fav-fix-mgr-btn fav-fix-mgr-btn-danger fav-fix-mgr-bulk" disabled>删除当前筛选结果</button>'
+                +     '</div>'
+                +     '<div class="fav-fix-mgr-foot-pager">'
+                +       '<div class="fav-fix-mgr-pageinfo"></div>'
+                +       '<button class="fav-fix-mgr-btn fav-fix-mgr-prev" disabled>上一页</button>'
+                +       '<button class="fav-fix-mgr-btn fav-fix-mgr-next" disabled>下一页</button>'
+                +     '</div>'
                 +   '</div>'
                 + '</div>';
             document.body.appendChild(host);
